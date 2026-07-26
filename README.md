@@ -76,12 +76,14 @@ This is the whole point: writes and rewrites cost a seed update, not a terabyte.
 ```bash
 meson setup build           # defaults: -Dstorage=lmdb -Dcontent=true -Dplugins=true
 meson compile -C build
-meson test    -C build      # differential, invariant, determinism, crash, protocol …
+meson test    -C build      # differential, invariant, determinism, crash, content,
+                            # protocol (nfsv3) + plugin lifecycle (host/luactl/perf)
 ```
 
 Key options: `-Dstorage=lmdb|memory`, `-Drng=philox|threefry`,
 `-Dcontent=`, `-Dplugins=`, `-Dlua=`. `lmdb` is the default (on-disk) engine;
-`memory` is the ephemeral one. Both pass the full test suite.
+`memory` is the ephemeral one — the whole suite passes on **both**
+(`meson setup buildmem -Dstorage=memory && meson test -C buildmem`).
 
 ## Run and mount
 

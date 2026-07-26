@@ -71,6 +71,17 @@ if get_option('plugins')
         )
         test('luactl', test_luactl, depends : luactl_so, timeout : 60)
     endif
+
+    #   perf — dlopen perf.so and run the generator benchmark on a tiny workload.
+    test_perf = executable(
+        'test_perf',
+        'perf/perf_test.cpp',
+        include_directories : [test_inc, prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],
+        cpp_args            : ['-DPERF_PLUGIN_SO="' + perf_so.full_path() + '"'],
+        dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
+    )
+    test('perf', test_perf, depends : perf_so, timeout : 60)
 endif
 
 #   DI registry is header-only (include/prfs/di.hpp) — links only gtest.

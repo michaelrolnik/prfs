@@ -329,6 +329,7 @@ fmt_files = files(
     'tests/host/host_test.cpp',
     'tests/nfsv3/nfsv3_test.cpp',
     'tests/luactl/luactl_test.cpp',
+    'tests/perf/perf_test.cpp',
     'tests/support.hpp',
     'tests/core/clock.cpp',
     'tests/core/contract.cpp',
