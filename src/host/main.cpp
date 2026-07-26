@@ -17,7 +17,9 @@
 //  --time seeds the store's logical clock (epoch seconds). New nodes stamp their
 //  atime/mtime/ctime with it, so `ls -l` shows real dates instead of 1970. The
 //  clock stays deterministic — it does not advance on its own; pass e.g.
-//  `--time $(date +%s)` to anchor it to now.
+//  `--time $(date +%s)` to anchor it to now. --time-advance bumps the clock once
+//  per NFS mutation, so successive changes get distinct, increasing mtimes
+//  (useful for tools that compare mtimes) — still deterministic per op sequence.
 //
 #include "prfs/host.hpp"
 #include "prfs/prfs.hpp"
@@ -82,6 +84,7 @@ int main(int argc, char** argv) {
     bool clean = false;
     int port = 0;
     int64_t clockSecs = -1;
+    bool timeAdvance = false;
     std::string control;
     std::vector<std::string> plugins;
     std::vector<std::string> pluginDirs;
@@ -91,6 +94,8 @@ int main(int argc, char** argv) {
     app.add_option("--engine", engine, "storage engine (di name): lmdb | memory");
     app.add_option("--port", port, "TCP port for NFS/MOUNT services (default 2049)");
     app.add_option("--time", clockSecs, "seed the logical clock (epoch seconds); new nodes use it");
+    app.add_flag("--time-advance", timeAdvance,
+                 "advance the clock per NFS mutation (distinct mtimes)");
     app.add_option("--control", control, "unix socket path for the luactl Lua console");
     app.add_option("--plugin", plugins, "front-end plugin .so to load")->expected(-1);
     app.add_option("--plugin-dir", pluginDirs, "directory to scan for *.so plugins")->expected(-1);
@@ -113,6 +118,9 @@ int main(int argc, char** argv) {
         prfs::host::Host host(*fs, *log);
         if (port != 0) {
             host.setOption("port", std::to_string(port));
+        }
+        if (timeAdvance) {
+            host.setOption("time-advance", "1");
         }
         if (!control.empty()) {
             host.setOption("control", control);

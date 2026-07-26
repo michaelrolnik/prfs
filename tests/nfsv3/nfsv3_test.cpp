@@ -488,3 +488,58 @@ TEST(NfsV3, MountWalkStat) {
     ::close(fd);
     loader.stopAll();
 }
+
+//  --time-advance: each NFS mutation bumps the logical clock, so two files
+//  created in sequence get distinct, increasing mtimes.
+TEST(NfsV3, TimeAdvance) {
+    const int port = 34568;
+
+    auto fs = makeMemStore();
+    fs->setTime(1000);
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    h.setOption("time-advance", "1");
+
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV3_PLUGIN_SO));
+    loader.startServices();
+
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    Reply mnt = rpc(fd, PROG_MOUNT, MOUNT_V3, 1, strArg("/"));
+    ASSERT_EQ(mnt.astat, 0u);
+    uint64_t rid = get64(&mnt.body[8]);
+    uint64_t rs = get64(&mnt.body[16]);
+
+    auto create = [&](std::string const& name, uint64_t& id, uint64_t& sn) {
+        std::vector<uint8_t> cr = fhArg(rid, rs);
+        std::vector<uint8_t> nm = strArg(name);
+        cr.insert(cr.end(), nm.begin(), nm.end());
+        put32(cr, 0); // UNCHECKED
+        for (int i = 0; i < 6; ++i) {
+            put32(cr, 0); // sattr3 unset
+        }
+        Reply r = rpc(fd, PROG_NFS, NFS_V3, 8, cr);
+        ASSERT_EQ(r.astat, 0u);
+        ASSERT_EQ(get32(&r.body[0]), 0u); // NFS3_OK
+        id = get64(&r.body[12]);
+        sn = get64(&r.body[20]);
+    };
+    auto mtimeOf = [&](uint64_t id, uint64_t sn) {
+        Reply g = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(id, sn));
+        return get32(&g.body[4 + 68]); // fattr3 mtime seconds
+    };
+
+    uint64_t i1, s1, i2, s2;
+    create("a", i1, s1);
+    create("b", i2, s2);
+    uint32_t m1 = mtimeOf(i1, s1);
+    uint32_t m2 = mtimeOf(i2, s2);
+    EXPECT_GE(m1, 1000u); // stamped from the seeded clock
+    EXPECT_GT(m2, m1);    // the clock advanced between the two creates
+
+    ::close(fd);
+    loader.stopAll();
+}

@@ -427,6 +427,7 @@ public:
     Error start() override {
         std::string ps = m_host.option("port");
         int port = ps.empty() ? 2049 : std::atoi(ps.c_str());
+        m_advance = m_host.option("time-advance") == "1"; // bump clock per mutation
 
         try {
             m_ctx.restart(); // reusable after a prior stop()
@@ -576,7 +577,14 @@ private:
         };
         if (prog == PROG_NFS && isMutating(proc)) {
             std::unique_lock<std::shared_mutex> lk(m_host.storeMutex());
-            return run();
+            uint32_t st = run();
+            if (m_advance) {
+                //  Advance the logical clock so the next mutation stamps a later
+                //  time — distinct, increasing mtimes, still deterministic.
+                IPrfs& fs = m_host.fs();
+                fs.setTime(fs.now() + 1);
+            }
+            return st;
         }
         std::shared_lock<std::shared_mutex> lk(m_host.storeMutex());
         return run();
@@ -1413,6 +1421,7 @@ private:
     }
 
     IHost& m_host;
+    bool m_advance = false; // --time-advance: bump the clock per mutation
     asio::io_context m_ctx;
     std::optional<tcp::acceptor> m_acc;
     std::vector<std::thread> m_threads;
