@@ -64,6 +64,20 @@ prfs_dep = declare_dependency(
     include_directories : prfs_inc,
 )
 
+#   NFS mapping — the FSSTAT/FSINFO projection over the store's O(1) Stats
+#   (design §9). Pure and engine-independent; the future NFS front-end serializes
+#   these structs. Depends only on the public interface, so it links no engine.
+libprfs_nfs = static_library(
+    'prfs-nfs',
+    'src/nfs/fsstat.cpp',
+    include_directories : prfs_inc,
+)
+
+prfs_nfs_dep = declare_dependency(
+    link_with           : libprfs_nfs,
+    include_directories : prfs_inc,
+)
+
 #   Scripting — prfs-lua (sol2 bindings) + prfs-test (scenario runner), design
 #   §12. libprfs stays lua-free; this sits on top. Lua and sol2 are git
 #   submodules; the whole layer is optional (-Dlua=false).
@@ -95,12 +109,12 @@ if get_option('lua')
         'src/lua/bindings.cpp',
         include_directories : prfs_inc,
         override_options    : ['warning_level=0'],  # sol2 is warning-heavy
-        dependencies        : [prfs_dep, prfs_ref_dep, sol2_dep],
+        dependencies        : [prfs_dep, prfs_ref_dep, prfs_nfs_dep, sol2_dep],
     )
     prfs_lua_dep = declare_dependency(
         link_with           : libprfs_lua,
         include_directories : prfs_inc,
-        dependencies        : [prfs_dep, prfs_ref_dep, sol2_dep],
+        dependencies        : [prfs_dep, prfs_ref_dep, prfs_nfs_dep, sol2_dep],
     )
     prfs_test = executable(
         'prfs-test',
@@ -122,6 +136,8 @@ fmt_files = files(
     'src/core/prfs.cpp',
     'src/storage/memory/kv.cpp',
     'src/storage/lmdb/kv.cpp',
+    'include/prfs/fsstat.hpp',
+    'src/nfs/fsstat.cpp',
     'include/prfs/lua.hpp',
     'src/lua/bindings.cpp',
     'src/lua/harness.cpp',
@@ -131,6 +147,7 @@ fmt_files = files(
     'tests/core/invariant.cpp',
     'tests/core/determinism.cpp',
     'tests/storage/lmdb/crash.cpp',
+    'tests/nfs/fsstat.cpp',
 )
 if clang_format.found()
     run_target('format', command : [clang_format, '-i'] + fmt_files)

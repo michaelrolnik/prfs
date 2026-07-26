@@ -14,6 +14,7 @@ tests = [
     ['invariant', 'core/invariant.cpp', 120],
     ['determinism', 'core/determinism.cpp', 120],
     ['crash', 'storage/lmdb/crash.cpp', 120],
+    ['fsstat', 'nfs/fsstat.cpp', 60],
 ]
 
 foreach t : tests
@@ -21,7 +22,7 @@ foreach t : tests
         'test_' + t[0],
         t[1],
         include_directories : test_inc,
-        dependencies        : [prfs_ref_dep, prfs_dep, gtest_dep],
+        dependencies        : [prfs_ref_dep, prfs_dep, prfs_nfs_dep, gtest_dep],
     )
     test(t[0], exe, timeout : t[2])
 endforeach

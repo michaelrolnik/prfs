@@ -561,8 +561,36 @@ read:
 ```
 
 Both the **current** and any **historical** snapshot's stats are O(1). They map directly
-onto NFS **`FSSTAT`/`FSINFO`** (`tfiles`/`ffiles`/`tbytes`/…). `snapshot()` carries the
-counters forward under the new snapId and otherwise writes nothing.
+onto NFS **`FSSTAT`/`FSINFO`**. `snapshot()` carries the counters forward under the new
+snapId and otherwise writes nothing.
+
+**FSSTAT / FSINFO mapping.** A synthetic target has no backing device, so *capacity* is a
+policy (`FsConfig`), not a measurement; *usage* comes from `Stats`. The projection is a pure
+function (`prfs::fsStat` / `prfs::fsInfo`, `include/prfs/fsstat.hpp`) — no storage, no XDR —
+that the NFS front-end serializes. It is engine-independent (depends only on `Stats`).
+
+```
+FSSTAT3resok (dynamic, per snapshot)        source
+  tbytes   total bytes                       max(FsConfig.capacityBytes, usedBytes)
+  fbytes   free bytes                         tbytes − usedBytes
+  abytes   available (no reservation)         == fbytes
+  tfiles   total file slots                   max(FsConfig.capacityFiles, usedFiles)
+  ffiles   free file slots                    tfiles − usedFiles
+  afiles   available                          == ffiles
+  invarsec invariant window                   0 (usage is volatile)
+      usedFiles = Σ nodes[REG..SOCK]      usedBytes = totalSize, rounded up to blockSize
+      capacity clamps up to usedX so free never underflows
+
+FSINFO3resok (static server params)         source
+  rt*/wt*/dtpref  transfer sizes             FsConfig (defaults 1 MiB rd/wr, 64 KiB readdir)
+  maxfilesize                                FsConfig (default 2^63−1)
+  time_delta                                 FsConfig (logical clock → {0s, 1ns})
+  properties                                 LINK | SYMLINK | HOMOGENEOUS | CANSETTIME
+```
+
+`properties` advertises what the store actually supports: hard links (§2.2), symlinks,
+homogeneous PATHCONF, and settable times (`SETATTR`). Reported through the Lua bindings as
+`store:fsStat()` and `prfs.fsInfo()`.
 
 **Dedup ratio (phase-2).** Because `content` is interned/hash-deduped, tracking
 `logicalSize` (Σ file sizes) vs `physicalSize` (Σ unique content-entity sizes) yields a live

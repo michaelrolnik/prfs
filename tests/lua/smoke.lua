@@ -80,4 +80,14 @@ assert(st.links >= 4)
 -- snapshots list ------------------------------------------------------------
 assert(#s:snapshots() == 2)
 
+-- FSSTAT / FSINFO mapping ---------------------------------------------------
+local fss = s:fsStat()
+assert(fss.tfiles - fss.ffiles == st.nodes[prfs.Type.DIR] + st.nodes[prfs.Type.REG]
+    + st.nodes[prfs.Type.LNK] + st.nodes[prfs.Type.BLK] + st.nodes[prfs.Type.CHR]
+    + st.nodes[prfs.Type.FIFO] + st.nodes[prfs.Type.SOCK], "used files == live nodes")
+assert(fss.abytes == fss.fbytes)
+
+local fsi = prfs.fsInfo()
+assert(fsi.rtpref > 0 and fsi.maxfilesize > 0)
+
 print("prfs lua smoke: OK")

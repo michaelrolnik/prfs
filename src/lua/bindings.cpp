@@ -19,6 +19,7 @@
 //    node:id() :type() :nlink() :size()/:setSize(v) :mode()/:setMode(v) (uid/gid/atime/mtime/ctime)
 //    node:target() :content() :rdev() -> (major, minor)
 //
+#include "prfs/fsstat.hpp"
 #include "prfs/lua.hpp"
 #include "prfs/memstore.hpp"
 #include "prfs/prfs.hpp"
@@ -108,6 +109,24 @@ sol::table statsLua(IPrfs& s, sol::this_state ts) {
     return lua.create_table_with("nodes", nodes, "links", st.links, "totalSize", st.totalSize);
 }
 
+sol::table fsStatLua(IPrfs& s, sol::this_state ts) {
+    sol::state_view lua(ts);
+    FsStat r = fsStat(s);
+    return lua.create_table_with( //
+        "tbytes", r.tbytes, "fbytes", r.fbytes, "abytes", r.abytes, "tfiles", r.tfiles, "ffiles",
+        r.ffiles, "afiles", r.afiles, "invarsec", r.invarsec);
+}
+
+sol::table fsInfoLua(sol::this_state ts) {
+    sol::state_view lua(ts);
+    FsInfo i = fsInfo();
+    return lua.create_table_with( //
+        "rtmax", i.rtmax, "rtpref", i.rtpref, "rtmult", i.rtmult, "wtmax", i.wtmax, "wtpref",
+        i.wtpref, "wtmult", i.wtmult, "dtpref", i.dtpref, "maxfilesize", i.maxfilesize,
+        "timeDeltaSec", i.timeDeltaSec, "timeDeltaNsec", i.timeDeltaNsec, "properties",
+        i.properties);
+}
+
 } // namespace
 
 void registerLua(sol::state_view lua) {
@@ -179,10 +198,12 @@ void registerLua(sol::state_view lua) {
         "snapshot", &IPrfs::snapshot,         //
         "diffNodes", &diffNodesLua,           //
         "diffPaths", &diffPathsLua,           //
-        "stats", &statsLua);
+        "stats", &statsLua,                   //
+        "fsStat", &fsStatLua);
 
     t["open"] = &luaOpen;
     t["mem"] = &luaMem;
+    t["fsInfo"] = &fsInfoLua;
 }
 
 } // namespace prfs
