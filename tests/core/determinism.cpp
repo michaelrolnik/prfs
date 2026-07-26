@@ -19,17 +19,13 @@
 using namespace prfs;
 using namespace prfs::test;
 
-namespace {
+static std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
 
-std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
-
-std::unique_ptr<IPrfs> backend() {
+static std::unique_ptr<IPrfs> backend() {
     Options o;
     o.clean = true;
     return openPrfs(uniqueTempDir("determinism").string(), o);
 }
-
-} // namespace
 
 class DeterminismTest : public ::testing::TestWithParam<Factory> {};
 

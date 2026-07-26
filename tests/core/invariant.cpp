@@ -30,17 +30,15 @@
 using namespace prfs;
 using namespace prfs::test;
 
-namespace {
+static std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
 
-std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
-
-std::unique_ptr<IPrfs> backend() {
+static std::unique_ptr<IPrfs> backend() {
     Options o;
     o.clean = true;
     return openPrfs(uniqueTempDir("invariant").string(), o);
 }
 
-void checkInvariants(IPrfs& fs, std::vector<Node> const& all, uint64_t rootId) {
+static void checkInvariants(IPrfs& fs, std::vector<Node> const& all, uint64_t rootId) {
     // Dedup handles by id (root appears once; each other node created once).
     std::map<uint64_t, Node> uniq;
     for (Node const& n : all) {
@@ -93,8 +91,6 @@ void checkInvariants(IPrfs& fs, std::vector<Node> const& all, uint64_t rootId) {
         ASSERT_EQ(s.nodes[t], nodeCount[t]) << "I5 nodes[" << t << "]";
     }
 }
-
-} // namespace
 
 class InvariantTest : public ::testing::TestWithParam<Factory> {};
 

@@ -21,21 +21,17 @@ using namespace prfs;
 using prfs::test::Factory;
 using prfs::test::uniqueTempDir;
 
-namespace {
+static std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
 
-std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
-
-std::unique_ptr<IPrfs> backend() {
+static std::unique_ptr<IPrfs> backend() {
     Options o;
     o.clean = true;
     return openPrfs(uniqueTempDir("snapdir").string(), o);
 }
 
-bool hasName(std::vector<std::pair<std::string, Node>> const& ents, std::string const& n) {
+static bool hasName(std::vector<std::pair<std::string, Node>> const& ents, std::string const& n) {
     return std::any_of(ents.begin(), ents.end(), [&](auto const& e) { return e.first == n; });
 }
-
-} // namespace
 
 class SnapDirTest : public ::testing::TestWithParam<Factory> {
 protected:

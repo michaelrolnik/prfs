@@ -19,10 +19,9 @@
 #include <vector>
 
 namespace prfs {
-namespace {
 
 // ---- key encoding --------------------------------------------------------
-std::string be(uint64_t x) {
+static std::string be(uint64_t x) {
     std::string s(8, '\0');
 
     for (int i = 7; i >= 0; --i) {
@@ -32,7 +31,7 @@ std::string be(uint64_t x) {
     return s;
 }
 
-uint64_t rdbe(char const* p) {
+static uint64_t rdbe(char const* p) {
     auto b = reinterpret_cast<unsigned char const*>(p);
     uint64_t x = 0;
 
@@ -46,11 +45,15 @@ uint64_t rdbe(char const* p) {
 // A node id with the top bit set is the virtual snapshot-list directory of the
 // node in the low 63 bits — a real, filehandle-round-trippable id in a reserved
 // id-space (real ids come from a small counter, so the bit is always free).
-constexpr uint64_t SNAP_BIT = uint64_t(1) << 63;
+static constexpr uint64_t SNAP_BIT = uint64_t(1) << 63;
 
-bool isSnapDir(uint64_t id) { return (id & SNAP_BIT) != 0; }
+static bool isSnapDir(uint64_t id) { return (id & SNAP_BIT) != 0; }
 
-uint64_t snapBase(uint64_t id) { return id & ~SNAP_BIT; }
+static uint64_t snapBase(uint64_t id) { return id & ~SNAP_BIT; }
+
+//  The record/store types are file-local; the anonymous namespace gives them
+//  internal linkage (a type can't be `static`).
+namespace {
 
 struct NodeRec {
     uint32_t type = 0, mode = 0, uid = 0, gid = 0, nlink = 0;

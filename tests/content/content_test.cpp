@@ -19,18 +19,14 @@
 using namespace prfs;
 using content::ContentConfig;
 
-namespace {
-
-std::string gen(ContentConfig const& c, uint64_t seed, uint64_t size) {
+static std::string gen(ContentConfig const& c, uint64_t seed, uint64_t size) {
     std::string s(size, '\0');
     size_t n = content::read(c, seed, size, 0, s.data(), size);
     s.resize(n);
     return s;
 }
 
-size_t distinct(std::string const& s) { return std::set<char>(s.begin(), s.end()).size(); }
-
-} // namespace
+static size_t distinct(std::string const& s) { return std::set<char>(s.begin(), s.end()).size(); }
 
 //  Every test starts from the default generator so ordering can't leak state.
 class ContentTest : public ::testing::Test {

@@ -20,12 +20,11 @@
 #include <vector>
 
 namespace prfs::content {
-namespace {
 
-constexpr uint64_t GOLDEN = 0x9E3779B97F4A7C15ull;
-constexpr uint64_t HOLE_TAG = 1, DUP_TAG = 2, DUP2_TAG = 3, DATA_TAG = 4, CORPUS_TAG = 5;
+static constexpr uint64_t GOLDEN = 0x9E3779B97F4A7C15ull;
+static constexpr uint64_t HOLE_TAG = 1, DUP_TAG = 2, DUP2_TAG = 3, DATA_TAG = 4, CORPUS_TAG = 5;
 
-uint64_t mix64(uint64_t x) {
+static uint64_t mix64(uint64_t x) {
     x ^= x >> 30;
     x *= 0xbf58476d1ce4e5b9ull;
     x ^= x >> 27;
@@ -36,28 +35,30 @@ uint64_t mix64(uint64_t x) {
 
 //  Portable coordinate hash — used for the block-type DECISIONS only (bucketing),
 //  never for the content bytes.
-uint64_t h(uint64_t a, uint64_t b, uint64_t tag) { return mix64(mix64(a * GOLDEN + b) + tag); }
+static uint64_t h(uint64_t a, uint64_t b, uint64_t tag) {
+    return mix64(mix64(a * GOLDEN + b) + tag);
+}
 
 //  Equiprobable alphabet size for a target entropy (0..255 ⇒ 0..8 bits/byte).
-int alphabet(uint8_t entropy) {
+static int alphabet(uint8_t entropy) {
     long k = std::lround(std::pow(2.0, 8.0 * double(entropy) / 255.0));
     return int(std::clamp<long>(k, 1, 256));
 }
 
-uint8_t mapByte(uint8_t v, int K) {
+static uint8_t mapByte(uint8_t v, int K) {
     if (K <= 1) {
         return 0;
     }
     return uint8_t((v % K) * 255 / (K - 1));
 }
 
-bool isHole(ContentConfig const& c, uint64_t seed, uint64_t b) {
+static bool isHole(ContentConfig const& c, uint64_t seed, uint64_t b) {
     return c.sparsePercent > 0 && h(seed, b, HOLE_TAG) % 100 < c.sparsePercent;
 }
 
 //  Source seed for a non-hole block: a shared FS-wide corpus entry (dedup) or a
 //  per-(file,block) unique value.
-uint64_t blockSrc(ContentConfig const& c, uint64_t seed, uint64_t b) {
+static uint64_t blockSrc(ContentConfig const& c, uint64_t seed, uint64_t b) {
     if (c.dedupPercent > 0 && c.dedupCorpus > 0 && h(seed, b, DUP_TAG) % 100 < c.dedupPercent) {
         uint64_t canon = h(seed, b, DUP2_TAG) % c.dedupCorpus;
         return h(0, canon, CORPUS_TAG); // keyed on the global 0 ⇒ cross-file dedup
@@ -65,8 +66,8 @@ uint64_t blockSrc(ContentConfig const& c, uint64_t seed, uint64_t b) {
     return h(seed, b, DATA_TAG);
 }
 
-void genBlock(ContentConfig const& c, uint64_t seed, uint64_t b, int K, rng::IRng const& gen,
-              char* buf) {
+static void genBlock(ContentConfig const& c, uint64_t seed, uint64_t b, int K, rng::IRng const& gen,
+                     char* buf) {
     uint32_t bs = c.blockSize;
     if (isHole(c, seed, b)) {
         std::memset(buf, 0, bs);
@@ -87,8 +88,6 @@ void genBlock(ContentConfig const& c, uint64_t seed, uint64_t b, int K, rng::IRn
         }
     }
 }
-
-} // namespace
 
 std::string serialize(ContentConfig const& c) {
     std::string s;

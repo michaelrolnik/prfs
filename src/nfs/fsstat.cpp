@@ -8,12 +8,11 @@
 #include "prfs/fsstat.hpp"
 
 namespace prfs {
-namespace {
 
 //  Advertised capacity must cover what is already used, so free never underflows.
-uint64_t freeOf(uint64_t used, uint64_t capacity) { return capacity > used ? capacity - used : 0; }
-
-} // namespace
+static uint64_t freeOf(uint64_t used, uint64_t capacity) {
+    return capacity > used ? capacity - used : 0;
+}
 
 FsStat fsStat(Stats const& s, FsConfig const& cfg) {
     uint64_t usedFiles = 0;

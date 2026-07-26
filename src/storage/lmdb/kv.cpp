@@ -16,9 +16,8 @@
 #include <stdexcept>
 
 namespace prfs {
-namespace {
 
-char const* kvName(Kv k) {
+static char const* kvName(Kv k) {
     switch (k) {
     case Kv::Nodes:
         return "nodes";
@@ -37,7 +36,11 @@ char const* kvName(Kv k) {
     }
 }
 
-MDB_val mval(std::string_view s) { return MDB_val{s.size(), const_cast<char*>(s.data())}; }
+static MDB_val mval(std::string_view s) { return MDB_val{s.size(), const_cast<char*>(s.data())}; }
+
+//  The engine types are file-local; the anonymous namespace gives them internal
+//  linkage (a type can't be `static`).
+namespace {
 
 class LmdbCursor : public IKvCursor {
 public:

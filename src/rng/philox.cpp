@@ -11,8 +11,10 @@
 #include <Random123/philox.h>
 
 namespace prfs::rng {
-namespace {
 
+//  A file-local type can't be `static`; the anonymous namespace gives it
+//  internal linkage. Everything that can be `static` (the objects below) is.
+namespace {
 struct Philox : IRng {
     void gen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) const override {
         philox4x32_ctr_t ctr = {{c[0], c[1], c[2], c[3]}};
@@ -24,9 +26,9 @@ struct Philox : IRng {
         out[3] = r.v[3];
     }
 };
+} // namespace
 
 static Philox g_philox;
 static di::Register<IRng> const reg{&g_philox, "philox"};
 
-} // namespace
 } // namespace prfs::rng

@@ -24,16 +24,14 @@
 using namespace prfs;
 using namespace prfs::test;
 
-namespace {
-
-std::unique_ptr<IPrfs> open(std::filesystem::path const& p, bool clean) {
+static std::unique_ptr<IPrfs> open(std::filesystem::path const& p, bool clean) {
     Options o;
     o.clean = clean;
     return openPrfs(p.string(), o);
 }
 
 //  True if committed writes survive dropping and reopening the store.
-bool persistent(std::filesystem::path const& p) {
+static bool persistent(std::filesystem::path const& p) {
     {
         auto fs = open(p, true);
         fs->link(fs->rwRoot(), "probe", fs->mkfile("x"));
@@ -42,8 +40,6 @@ bool persistent(std::filesystem::path const& p) {
     auto fs = open(p, false);
     return fs->lookup(fs->rwRoot(), "probe") != nullptr;
 }
-
-} // namespace
 
 TEST(CrashSafety, CommittedStateSurvivesReopen) {
     if (!persistent(uniqueTempDir("probe"))) {

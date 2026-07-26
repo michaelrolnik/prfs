@@ -14,17 +14,13 @@
 
 using namespace prfs;
 
-namespace {
-
-Stats makeStats(uint64_t reg, uint64_t dir, uint64_t totalSize) {
+static Stats makeStats(uint64_t reg, uint64_t dir, uint64_t totalSize) {
     Stats s;
     s.nodes[int(Type::REG)] = reg;
     s.nodes[int(Type::DIR)] = dir;
     s.totalSize = totalSize;
     return s;
 }
-
-} // namespace
 
 TEST(FsStat, UsedFilesAreSummedAcrossTypes) {
     Stats s = makeStats(/*reg*/ 3, /*dir*/ 2, /*bytes*/ 0);

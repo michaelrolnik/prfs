@@ -27,15 +27,18 @@
 #include <set>
 
 namespace prfs {
-namespace {
 
 // The synthesized .snapshot dir of a node uses that node's id with the top bit
 // set — a reserved, filehandle-round-trippable id (design §3.2).
-constexpr uint64_t SNAP_BIT = uint64_t(1) << 63;
+static constexpr uint64_t SNAP_BIT = uint64_t(1) << 63;
 
-bool isSnapDir(uint64_t id) { return (id & SNAP_BIT) != 0; }
+static bool isSnapDir(uint64_t id) { return (id & SNAP_BIT) != 0; }
 
-uint64_t snapBase(uint64_t id) { return id & ~SNAP_BIT; }
+static uint64_t snapBase(uint64_t id) { return id & ~SNAP_BIT; }
+
+//  The reference-model types are file-local; the anonymous namespace gives them
+//  internal linkage (a type can't be `static`).
+namespace {
 
 struct Attr {
     Type type{};

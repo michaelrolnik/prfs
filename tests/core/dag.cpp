@@ -20,17 +20,13 @@ using prfs::test::canon;
 using prfs::test::Factory;
 using prfs::test::uniqueTempDir;
 
-namespace {
+static std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
 
-std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
-
-std::unique_ptr<IPrfs> backend() {
+static std::unique_ptr<IPrfs> backend() {
     Options o;
     o.clean = true;
     return openPrfs(uniqueTempDir("dag").string(), o);
 }
-
-} // namespace
 
 class DagTest : public ::testing::TestWithParam<Factory> {
 protected:

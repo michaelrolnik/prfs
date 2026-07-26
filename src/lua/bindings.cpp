@@ -33,9 +33,8 @@
 #include <string>
 
 namespace prfs {
-namespace {
 
-std::shared_ptr<IPrfs> luaOpen(std::string const& path, sol::optional<sol::table> opts) {
+static std::shared_ptr<IPrfs> luaOpen(std::string const& path, sol::optional<sol::table> opts) {
     Options o;
     if (opts) {
         o.clean = opts->get_or("clean", false);
@@ -43,9 +42,9 @@ std::shared_ptr<IPrfs> luaOpen(std::string const& path, sol::optional<sol::table
     return openPrfs(path, o);
 }
 
-std::shared_ptr<IPrfs> luaMem() { return makeMemStore(); }
+static std::shared_ptr<IPrfs> luaMem() { return makeMemStore(); }
 
-sol::table readdirLua(IPrfs& s, Node dir, sol::this_state ts) {
+static sol::table readdirLua(IPrfs& s, Node dir, sol::this_state ts) {
     sol::state_view lua(ts);
     sol::table out = lua.create_table();
     int i = 1;
@@ -56,8 +55,8 @@ sol::table readdirLua(IPrfs& s, Node dir, sol::this_state ts) {
     return out;
 }
 
-sol::table readdirPageLua(IPrfs& s, Node dir, std::string const& after, size_t max,
-                          sol::this_state ts) {
+static sol::table readdirPageLua(IPrfs& s, Node dir, std::string const& after, size_t max,
+                                 sol::this_state ts) {
     sol::state_view lua(ts);
     DirPage p = s.readdirPage(dir, after, max);
     sol::table ents = lua.create_table();
@@ -69,7 +68,7 @@ sol::table readdirPageLua(IPrfs& s, Node dir, std::string const& after, size_t m
     return lua.create_table_with("entries", ents, "cookie", p.cookie, "eof", p.eof);
 }
 
-sol::table parentsLua(IPrfs& s, Node node, sol::this_state ts) {
+static sol::table parentsLua(IPrfs& s, Node node, sol::this_state ts) {
     sol::state_view lua(ts);
     sol::table out = lua.create_table();
     int i = 1;
@@ -80,7 +79,7 @@ sol::table parentsLua(IPrfs& s, Node node, sol::this_state ts) {
     return out;
 }
 
-sol::table snapshotsLua(IPrfs& s, sol::this_state ts) {
+static sol::table snapshotsLua(IPrfs& s, sol::this_state ts) {
     sol::state_view lua(ts);
     sol::table out = lua.create_table();
     int i = 1;
@@ -91,7 +90,7 @@ sol::table snapshotsLua(IPrfs& s, sol::this_state ts) {
     return out;
 }
 
-sol::table diffNodesLua(IPrfs& s, SnapId a, SnapId b, sol::this_state ts) {
+static sol::table diffNodesLua(IPrfs& s, SnapId a, SnapId b, sol::this_state ts) {
     sol::state_view lua(ts);
     sol::table out = lua.create_table();
     int i = 1;
@@ -102,7 +101,7 @@ sol::table diffNodesLua(IPrfs& s, SnapId a, SnapId b, sol::this_state ts) {
     return out;
 }
 
-sol::table diffPathsLua(IPrfs& s, SnapId a, SnapId b, sol::this_state ts) {
+static sol::table diffPathsLua(IPrfs& s, SnapId a, SnapId b, sol::this_state ts) {
     sol::state_view lua(ts);
     sol::table out = lua.create_table();
     int i = 1;
@@ -114,17 +113,17 @@ sol::table diffPathsLua(IPrfs& s, SnapId a, SnapId b, sol::this_state ts) {
     return out;
 }
 
-SnapId snapshotLua(IPrfs& s, sol::optional<std::string> label) {
+static SnapId snapshotLua(IPrfs& s, sol::optional<std::string> label) {
     return s.snapshot(label.value_or(""));
 }
 
-sol::table snapInfoLua(IPrfs& s, SnapId g, sol::this_state ts) {
+static sol::table snapInfoLua(IPrfs& s, SnapId g, sol::this_state ts) {
     sol::state_view lua(ts);
     SnapInfo i = s.snapInfo(g);
     return lua.create_table_with("id", i.id, "ctime", i.ctime, "label", i.label);
 }
 
-sol::table statsLua(IPrfs& s, sol::this_state ts) {
+static sol::table statsLua(IPrfs& s, sol::this_state ts) {
     sol::state_view lua(ts);
     Stats st = s.stats();
     sol::table nodes = lua.create_table();
@@ -135,7 +134,7 @@ sol::table statsLua(IPrfs& s, sol::this_state ts) {
     return lua.create_table_with("nodes", nodes, "links", st.links, "totalSize", st.totalSize);
 }
 
-sol::table fsStatLua(IPrfs& s, sol::this_state ts) {
+static sol::table fsStatLua(IPrfs& s, sol::this_state ts) {
     sol::state_view lua(ts);
     FsStat r = fsStat(s);
     return lua.create_table_with( //
@@ -143,7 +142,7 @@ sol::table fsStatLua(IPrfs& s, sol::this_state ts) {
         r.ffiles, "afiles", r.afiles, "invarsec", r.invarsec);
 }
 
-sol::table fsInfoLua(sol::this_state ts) {
+static sol::table fsInfoLua(sol::this_state ts) {
     sol::state_view lua(ts);
     FsInfo i = fsInfo();
     return lua.create_table_with( //
@@ -152,8 +151,6 @@ sol::table fsInfoLua(sol::this_state ts) {
         "timeDeltaSec", i.timeDeltaSec, "timeDeltaNsec", i.timeDeltaNsec, "properties",
         i.properties);
 }
-
-} // namespace
 
 void registerLua(sol::state_view lua) {
     sol::table t = lua.create_named_table("prfs");

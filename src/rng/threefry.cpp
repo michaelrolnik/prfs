@@ -13,8 +13,10 @@
 #include <Random123/threefry.h>
 
 namespace prfs::rng {
-namespace {
 
+//  A file-local type can't be `static`; the anonymous namespace gives it
+//  internal linkage. Everything that can be `static` (the objects below) is.
+namespace {
 struct Threefry : IRng {
     void gen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) const override {
         threefry4x32_ctr_t ctr = {{c[0], c[1], c[2], c[3]}};
@@ -26,9 +28,9 @@ struct Threefry : IRng {
         out[3] = r.v[3];
     }
 };
+} // namespace
 
 static Threefry g_threefry;
 static di::Register<IRng> const reg{&g_threefry, "threefry"};
 
-} // namespace
 } // namespace prfs::rng

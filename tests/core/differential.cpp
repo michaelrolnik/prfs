@@ -19,17 +19,13 @@
 using namespace prfs;
 using namespace prfs::test;
 
-namespace {
+static std::unique_ptr<IPrfs> makeOracle() { return makeMemStore(); }
 
-std::unique_ptr<IPrfs> makeOracle() { return makeMemStore(); }
-
-std::unique_ptr<IPrfs> makeBackend() {
+static std::unique_ptr<IPrfs> makeBackend() {
     Options o;
     o.clean = true;
     return openPrfs(uniqueTempDir("diff").string(), o);
 }
-
-} // namespace
 
 class DiffTest : public ::testing::TestWithParam<unsigned> {};
 
