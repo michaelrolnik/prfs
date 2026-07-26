@@ -5,6 +5,9 @@ real bugs found in the code. Each links to a TODO in `todo.md`.
 
 Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜ open.
 
+**All currently-tracked bugs are resolved.** New findings get a row above and a write-up under
+Resolved (or a reopened Open section).
+
 | ID  | Sev | Status | Title                                                  | TODO |
 | --- | --- | ------ | ------------------------------------------------------ | ---- |
 | B1  | 🔴  | ✅     | Directory cycles must be prevented (multi-parent DIRs) | T1   |
@@ -13,24 +16,11 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 | B4  | 🟠  | ✅     | `readdir` pagination on a live directory               | T4   |
 | B5  | 🟡  | ✅     | Synthesized `.snapshot` has no concrete identity       | T5   |
 | B6  | 🟡  | ✅     | Timestamp source unspecified                           | T6   |
-| B7  | 🟡  | ⬜     | `size` vs content block-structure authority            | T7   |
-| B8  | 🟡  | ⬜     | `linkMode` in schema ahead of decision                 | T8   |
+| B7  | 🟡  | ✅     | `size` vs content block-structure authority            | T7   |
+| B8  | 🟡  | ✅     | `linkMode` in schema ahead of decision                 | T8   |
 | B9  | 🟡  | ✅     | `stats().links` undercounted orphan-dir entries        | S9   |
 
 ---
-
-## Details
-
-### B7 — `size` vs content block-structure authority 🟡 ⬜
-
-Two files sharing a `contentID` may have different `size`; the block structure must be
-size-parametric and `size` authoritative for `st_size`. Needs stating to avoid a "which wins"
-inconsistency. → T7.
-
-### B8 — `linkMode` in schema ahead of decision 🟡 ⬜
-
-The `nodes` value already carries `linkMode`, but the COW-vs-hybrid choice (design §3.4/§11) is
-undecided — the schema commits to an unbuilt feature. Mark it reserved or defer. → T8.
 
 ## Resolved
 
@@ -87,6 +77,22 @@ uses the entry **name** as the cursor over the name-ordered link set — inheren
 cursor appear later, adds behind are not revisited, removals ahead are skipped, and removing the
 cursor entry still resumes. Both engines; `tests/core/readdirpage.cpp` + Lua `store:readdirPage`.
 *Deferred to L2:* mapping the string cookie to a 64-bit NFS cookie for over-long names.
+
+### B7 — `size` vs content block-structure authority 🟡 ✅
+
+Two files sharing a `contentID` may have different `size`. Resolved (design §2.1): the per-node
+`size` attribute — not the shared block structure — is authoritative for `st_size`/`READ`; the
+block structure is size-parametric (same recipe, any length), and the content provider generates
+`size` bytes from it. `size` is set explicitly on the node; the store never derives it from
+`content` (which it never parses). Doc clarification; no code change (the store already treats
+`size` as a plain node attribute).
+
+### B8 — `linkMode` in schema ahead of decision 🟡 ✅
+
+The schema listed a `linkMode` attr for a per-directory COW-vs-LOG strategy that is undecided
+(§3.4/§11). Resolved (design §5): marked **reserved** and documented that the implementation is
+pure COW — `NodeRec` carries no `linkMode` field, so the schema no longer commits to an unbuilt
+feature. Adding it later is a record-format bump behind the existing versioning.
 
 ### B2 — `diff` / `changes` semantics 🟡 ✅
 

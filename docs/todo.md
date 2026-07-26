@@ -15,8 +15,8 @@ Status: ✅ done · ⬜ open.
 | T4  | ✅     | `readdir` cookies + live-dir mutate-mid-scan (fixes B4)                     |
 | T5  | ✅     | Synthesized `.snapshot` node: identity, attrs, `readdir`, filehandle (B5)   |
 | T6  | ✅     | Deterministic logical / script-driven clock (fixes B6)                     |
-| T7  | ⬜     | `size` vs content-block-structure authority (fixes B7)                      |
-| T8  | ⬜     | Mark `linkMode` reserved / defer (fixes B8)                                 |
+| T7  | ✅     | `size` vs content-block-structure authority (fixes B7)                      |
+| T8  | ✅     | Mark `linkMode` reserved / defer (fixes B8)                                 |
 | T9  | ⬜     | Define `Error`, `Stats`, `Options` when fleshing design §7                  |
 | D1  | ⬜     | Hybrid link-set: pure COW vs per-dir COW/LOG vs bucketed COW                |
 | D2  | ⬜     | Content layout: procedural recipe vs explicit extent list vs both           |
@@ -50,8 +50,8 @@ Status: ✅ done · ⬜ open.
 - **T4** ✅ — paginated `readdirPage(dir, after, max)` with a **name cursor** (design §6.2): stable across concurrent add/remove (entry returned once; adds-ahead appear, adds-behind don't, removals-ahead skipped, removed-cursor still resumes), `eof` set as soon as the end is known; `.snapshot` dir paginates numerically. Both engines; Lua `store:readdirPage`; `tests/core/readdirpage.cpp`. Fixes B4. *Deferred to L2:* string-cookie → 64-bit NFS cookie mapping for over-long names.
 - **T5** ✅ — synthesized `.snapshot` node (design §3.2): concrete id `D.id | (1<<63)` (reserved top-bit id-space, filehandle round-trip), GETATTR-able read-only `0555` dir (nlink 1, times mirror `D`), `readdir` lists `"N"` per snapshot `D` existed at, `lookup(snapDir,"N")` → `(D.id, N)`. Live-view-only (no nesting), DIR-only, hidden from `readdir` but resolvable; `link`/`move` reject the reserved name. Both engines; Lua `prfs.SNAPSHOT_NAME`; `tests/core/snapdir.cpp`. Fixes B5. *Deferred to L2:* config flag to list `.snapshot` in `readdir`.
 - **T6** ✅ — timestamp policy: a deterministic, script-driven **logical clock** (design §3.5). `IPrfs::now()`/`setTime()` on the interface; new nodes stamp `atime=mtime=ctime=now()`, other time changes explicit; never wall-clock; persisted in `meta` (survives reopen). Both engines; Lua `store:now()`/`setTime()`; tests `tests/core/clock.cpp` + crash-suite persistence. Fixes B6.
-- **T7** ⬜ — state `size` vs content-block-structure relationship (fixes B7).
-- **T8** ⬜ — mark `linkMode` reserved, or defer until the hybrid decision (fixes B8).
+- **T7** ✅ — `size` (the per-node attr) is authoritative for `st_size`/`READ`; the shared block structure is size-parametric and the store never derives `size` from `content` (design §2.1). Fixes B7.
+- **T8** ✅ — `linkMode` marked **reserved** in the schema; implementation is pure COW and `NodeRec` carries no `linkMode` field, so the schema no longer commits to the undecided §3.4 hybrid (design §5). Fixes B8.
 - **T9** ⬜ — define `Error`, `Stats`, `Options` when fleshing design §7.
 
 ## Open decisions (design §11)

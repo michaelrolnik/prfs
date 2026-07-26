@@ -87,6 +87,14 @@ fields rather than carrying a fat struct):
 There is deliberately **no per-node `seed`** — a regular file's content recipe (seed,
 compressibility, dedup, block patterns) lives inside its shared `content` entity.
 
+**`size` is authoritative for `st_size`.** The per-node `size` attribute — not the shared
+block structure — is what `GETATTR`/`READ` report and what the content provider is asked to
+fill up to. The block structure is deliberately **size-parametric**: two files can share one
+`contentID` yet have different `size`s (same recipe, different lengths), so the provider
+generates `size` bytes from the recipe. `size` is set explicitly on the node; the store never
+derives it from `content` (which it never parses). A `READ` past `size` is short/EOF
+regardless of what the recipe could produce.
+
 ### 2.2 Directory graph — multiple parents (a DAG)
 
 A directory may have **several parents** (several up links), so the namespace is a directed
@@ -328,7 +336,7 @@ out before the txn ends); keep read transactions short.
 | Sub-DB     | Key                                                       | Value                                                                       | Flags     |
 |------------|-----------------------------------------------------------|-----------------------------------------------------------------------------|-----------|
 | `meta`     | `"next_node"`/`"next_str"`/`"next_content"`/`"cur_snap"`/`"root"`/`"clock"` | scalar                                                 | —         |
-| `nodes`    | `nodeID(8) ‖ snapId(8)`                                    | `{type, mode, nlink, uid, gid, size, atime, mtime, ctime, spec(8), dnLinkVer(8), upLinkVer(8), linkMode}` | —         |
+| `nodes`    | `nodeID(8) ‖ snapId(8)`                                    | `{type, mode, nlink, uid, gid, size, atime, mtime, ctime, spec(8), dnLinkVer(8), upLinkVer(8)}` `[linkMode — reserved]` | —         |
 | `downlinks`| `containerID(8) ‖ dnLinkVer(8) ‖ stringID(8)`            | `{childNodeID(8)}`                                                          | —         |
 | `uplinks`  | `nodeID(8) ‖ upLinkVer(8) ‖ containerID(8) ‖ stringID(8)`| `{}`                                                                        | —         |
 | `strings`  | `stringID(8)`                                             | `{snapId(8), bytes}`                                                         | —         |
@@ -345,6 +353,11 @@ Notes:
   its effective `(container, dnLinkVer)` prefix. LOG-mode dirs (§3.4) instead key entries
   by `container ‖ stringID ‖ snapId` with a live/deleted flag — the `linkMode` attr says
   which representation a directory uses.
+- **`linkMode` is reserved, not yet stored.** The COW-vs-LOG-vs-bucketed hybrid (§3.4/§11)
+  is undecided, so the current implementation is **pure COW** and `NodeRec` carries no
+  `linkMode` field. The name is held in the schema for the eventual per-directory strategy;
+  until that decision lands, treat directories as COW-only. Adding it later is a record-format
+  bump behind the existing versioning, not a redesign.
 - `nodes.spec` is polymorphic by `type` (§2.1): `stringID` (`LNK`), packed device number
   (`BLK`/`CHR`), `contentID` (`REG`), or `0`.
 - `strings` and `content` are twin interned tables — immutable, hash-deduplicated,
