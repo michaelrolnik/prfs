@@ -5,11 +5,11 @@ by `(interface-id, flavor)`; consumers resolve by interface (with an optional fl
 substrate the plugin host ([`plugins.md`](plugins.md)) and the built-in extension points (rng
 generators, storage engines) all share — one wiring mechanism instead of three.
 
-The concepts are borrowed from the vendor **`ref_di`** reference (named import/export,
-flavors, fail-loud on unresolved, per-scope isolation, introspection) but re-expressed
-idiomatically in C++: **typed** (no `void*` vtable patching), **RAII** (scopes are objects, no
-teardown machinery), and **explicit** (no `__attribute__((constructor))` magic, no C ABI). See
-§8 for exactly what was taken and what was dropped, and why.
+It follows the well-worn **service-locator / DI** pattern (named binding, variant *flavors*,
+fail-loud on unresolved, per-scope isolation, introspection) but re-expressed idiomatically in
+C++: **typed** (no `void*` vtable patching), **RAII** (scopes are objects, no teardown
+machinery), and **explicit** (no `__attribute__((constructor))` magic, no C ABI). §8 lays out the
+choices against a C-style runtime-linker container and why we made them.
 
 > **Development principles (binding, design §13):** SOLID, test-first, clang-format.
 
@@ -58,7 +58,7 @@ public:
     void requireAllResolved() const;   // throws once, listing every missing (id, flavor)
 };
 
-Registry& global();                    // the process-wide default registry
+Registry& global();                    // default registry — a function-local static (see §2.1)
 
 //  convenience wrappers over global()
 template <class I> void provide(I*, std::string_view flavor = "");
@@ -68,35 +68,52 @@ template <class I> I* tryResolve(std::string_view flavor = "");
 } // namespace prfs::di
 ```
 
+### 2.1 `global()` is a function, not a variable (SIOF-safe)
+
+The default registry is reached only through `global()`, implemented as a **function-local
+static** (Meyers singleton):
+
+```cpp
+Registry& global() { static Registry r; return r; }
+```
+
+This is required, not cosmetic. Built-in providers self-register via `static di::Register<I>`
+objects that run at **static-init time** and call `global().provide(...)`. A namespace-scope
+`Registry` variable could be constructed *after* some other TU's `Register` runs — the
+static-initialization-order fiasco. A function-local static is constructed on **first call**, so
+the registry always exists before the first `provide()`. (This is exactly why `rng.cpp`'s
+`registry()` is a function-local static.)
+
 Storage is a `map<pair<string,string>, Slot>` where `Slot = { void* impl; std::string_view id; }`;
 `provide<I>` records `{impl, I::ID}` at key `(I::ID, flavor)`, `resolve<I>` looks up `(I::ID,
-flavor)` and `static_cast<I*>`s. Type safety rests on the **ID↔type contract** — the same
-convention `ref_di` relies on, made explicit by versioning the ID.
+flavor)` and `static_cast<I*>`s. Type safety rests on the **ID↔type contract** — the usual
+convention for a type-erased registry, made explicit by versioning the ID.
 
 ---
 
-## 3. Fail-loud (the `ref_di` sentinel idea, C++-style)
+## 3. Fail-loud (unresolved dependencies)
 
-`ref_di` points an unresolved interface at a vtable of `abort()+backtrace`, so a missing
-dependency crashes loudly instead of a silent null-deref. We get the same guarantee more simply,
-because we *pull*:
+One classic way to make a missing dependency safe is to point an unresolved interface at a
+sentinel vtable that `abort()`s with a backtrace when called, instead of leaving a null that
+segfaults. We get the same guarantee more simply, because we *pull*:
 
 - **`resolve<I>()` throws `di::Unresolved`** (message = interface ID + flavor) rather than
   returning a surprise null — you cannot accidentally deref an unwired dependency.
 - **`require<I>()` + `requireAllResolved()`** — a component declares what it needs at startup;
-  the host validates once and throws listing *every* missing `(id, flavor)`. This mirrors
-  `ref_di_require_all_resolved` and turns a mid-run failure into a clear startup error.
+  the host validates once and throws listing *every* missing `(id, flavor)`, turning a mid-run
+  failure into a clear startup error.
 
 Throwing at `resolve()`/startup catches the problem at *wiring* time, before first use — so we
-don't need `ref_di`'s abort-on-call proxy.
+don't need an abort-on-call sentinel proxy.
 
 ---
 
 ## 4. Scopes = `Registry` instances (RAII)
 
-`ref_di` has explicit `scope_create`/`destroy`/`teardown` with orphan-root gymnastics because its
-registration is global and constructor-time, and a DSO can outlive the scope that adopted it. We
-sidestep all of that: **a scope is just a `Registry` value.**
+A C-style container needs explicit `scope_create`/`destroy`/`teardown` (and orphan-root
+gymnastics) because its registration is global and constructor-time, and a `dlopen`'d module can
+outlive the scope that adopted it. We sidestep all of that: **a scope is just a `Registry`
+value.**
 
 ```cpp
 di::Registry r;                       // a hermetic scope
@@ -126,12 +143,13 @@ implicit macro side-effects.
 
 ---
 
-## 6. Flavors vs `ref_di`
+## 6. Flavors — pull, not push
 
-`ref_di`'s flavor `select` *refines already-bound imports* and *replays* a remembered flavor list
-— machinery for its **push** model (import-slots are patched as exports arrive). Ours is **pull**:
-`resolve<I>(flavor)` is just a lookup key, chosen when the consumer asks. Simpler, and it needs no
-replay. The build/CLI sets the default flavor per interface (`-Dstorage=` → engine flavor,
+A **push**-binding container patches import-slots as providers arrive, so selecting a flavor means
+*refining already-bound imports* and *replaying* a remembered flavor list — real machinery. Ours
+is **pull**: `resolve<I>(flavor)` is just a lookup key, chosen when the consumer asks. Simpler, and
+it needs no replay. The build/CLI sets the default flavor per interface (`-Dstorage=` → engine
+flavor,
 `-Drng=` → rng flavor); `resolve<I>("")` returns the unflavored provider when there is exactly
 one, else the selected default.
 
@@ -139,16 +157,16 @@ one, else the selected default.
 
 ## 7. Threading
 
-Like `ref_di`, registration/resolution is a **single-threaded bootstrap**: wire everything at
-startup on one thread; during serving the registry is read-only, so concurrent `resolve()` is
-safe. Mutating (`provide`/`withdraw`) after bootstrap is the caller's responsibility to serialize
-(only the plugin host does it, on load/unload).
+Registration/resolution is a **single-threaded bootstrap**: wire everything at startup on one
+thread; during serving the registry is read-only, so concurrent `resolve()` is safe. Mutating
+(`provide`/`withdraw`) after bootstrap is the caller's responsibility to serialize (only the
+plugin host does it, on load/unload).
 
 ---
 
-## 8. What we borrowed vs dropped (vs `ref_di`)
+## 8. Design choices (vs a C-style runtime linker)
 
-| From `ref_di`                          | prfs `di`                                  |
+| A C-style runtime-linker container     | prfs `di`                                  |
 | -------------------------------------- | ------------------------------------------ |
 | named, decoupled import/export binding | ✅ `(interface-id, flavor)` keyed registry |
 | flavors (variant selection)            | ✅ kept — pull-side lookup key             |
@@ -160,9 +178,9 @@ safe. Mutating (`provide`/`withdraw`) after bootstrap is the caller's responsibi
 | dlopen/orphan-root/teardown machinery  | ❌ RAII + the plugin host handle lifetime  |
 | push-binding + flavor replay           | ❌ pull (`resolve` on demand)              |
 
-Net: `ref_di`'s decoupling + flavors + fail-loud + test-scopes, at a fraction of the code, with
-C++ type-safety and RAII intact — without undoing the "C++ interfaces + `extern "C"` factory"
-boundary decision. Conceptual credit: the vendor `ref_di` reference (BSD-3).
+Net: the decoupling + flavors + fail-loud + test-scopes of a runtime-linker DI, at a fraction of
+the code, with C++ type-safety and RAII intact — without undoing the "C++ interfaces + `extern
+"C"` factory" boundary decision.
 
 ---
 
