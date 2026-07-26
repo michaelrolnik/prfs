@@ -10,7 +10,7 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 | B1  | 🔴  | ✅     | Directory cycles must be prevented (multi-parent DIRs) | T1   |
 | B2  | 🟡  | ✅     | `diff` / `changes` semantics undefined                 | T2   |
 | B3  | 🟠  | ✅     | Snapshot metadata lost                                 | T3   |
-| B4  | 🟠  | ⬜     | `readdir` pagination on a live directory               | T4   |
+| B4  | 🟠  | ✅     | `readdir` pagination on a live directory               | T4   |
 | B5  | 🟡  | ✅     | Synthesized `.snapshot` has no concrete identity       | T5   |
 | B6  | 🟡  | ✅     | Timestamp source unspecified                           | T6   |
 | B7  | 🟡  | ⬜     | `size` vs content block-structure authority            | T7   |
@@ -20,12 +20,6 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 ---
 
 ## Details
-
-### B4 — `readdir` pagination on a live (mutable) directory 🟠 ⬜
-
-NFS `READDIR` is paginated with cookies; the live dir can change between calls. Cookie stability
-and add/remove-mid-scan behaviour are undefined. (Sealed snapshot dirs are immutable and fine.)
-→ T4.
 
 ### B7 — `size` vs content block-structure authority 🟡 ⬜
 
@@ -83,6 +77,16 @@ and `lookup(snapDir,"N")` → `(D.id, N)`. Live-view-only (no nesting), DIR-only
 `readdir` but resolvable; `link`/`move` reject the reserved name (`INVAL`). Both engines;
 `tests/core/snapdir.cpp` (9 cases × 2 engines). *Deferred to the NFS front-end (todo L2):* a
 config flag to also *list* `.snapshot` in `readdir`.
+
+### B4 — `readdir` pagination on a live (mutable) directory 🟠 ✅
+
+NFS `READDIR` is paginated and the live dir can change between calls; cookie stability and
+add/remove-mid-scan behaviour were undefined. Fixed (design §6.2): `readdirPage(dir, after, max)`
+uses the entry **name** as the cursor over the name-ordered link set — inherently stable, no
+`cookieverf` needed. Every entry present for the whole scan is returned once; adds ahead of the
+cursor appear later, adds behind are not revisited, removals ahead are skipped, and removing the
+cursor entry still resumes. Both engines; `tests/core/readdirpage.cpp` + Lua `store:readdirPage`.
+*Deferred to L2:* mapping the string cookie to a 64-bit NFS cookie for over-long names.
 
 ### B2 — `diff` / `changes` semantics 🟡 ✅
 

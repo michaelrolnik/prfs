@@ -347,6 +347,61 @@ public:
         return out;
     }
 
+    DirPage readdirPage(Node dir, std::string const& after, size_t max) override {
+        DirPage page;
+        auto r = m_kv->begin(false);
+
+        //  .snapshot dir: entries "N" paginate by snapId (numeric cursor).
+        if (isSnapDir(dir->id())) {
+            uint64_t base = snapBase(dir->id());
+            SnapId start = 1;
+            SnapId c;
+            if (!after.empty() && parseSnap(after, c)) {
+                start = c + 1;
+            }
+            for (SnapId n = start; n < m_cur; ++n) {
+                if (!existedAt(r.get(), base, n)) {
+                    continue;
+                }
+                if (page.entries.size() == max) {
+                    return page; // eof stays false: more remain
+                }
+                page.entries.push_back({std::to_string(n), handle(base, n)});
+                page.cookie = std::to_string(n);
+            }
+            page.eof = true;
+            return page;
+        }
+
+        NodeRec dr;
+        if (!loadNode(r.get(), dir->id(), rr(dir->snap()), dr)) {
+            page.eof = true;
+            return page;
+        }
+
+        //  Normal dir: name cursor over the ordered down-link set. A name-keyed
+        //  cursor is stable across add/remove — no cookie verifier needed.
+        std::string pfx = be(dir->id()) + be(dr.dnLinkVer);
+        auto cur = r->cursor(Kv::DownLinks);
+        for (bool ok = cur->seek(pfx + after); ok; ok = cur->next()) {
+            auto k = cur->key();
+            if (k.size() < 16 || memcmp(k.data(), pfx.data(), 16) != 0) {
+                break; // left this directory's key range
+            }
+            std::string name(k.data() + 16, k.size() - 16);
+            if (name <= after) {
+                continue; // skip the cursor's own (or an earlier) entry
+            }
+            if (page.entries.size() == max) {
+                return page; // eof stays false: at least one more entry exists
+            }
+            page.entries.push_back({name, handle(rdbe(cur->val().data()), dir->snap())});
+            page.cookie = name;
+        }
+        page.eof = true;
+        return page;
+    }
+
     std::vector<Node> parents(Node node) override {
         std::vector<Node> out;
         std::set<uint64_t> seen;

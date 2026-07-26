@@ -14,6 +14,7 @@
 //    store:lookup(dir,name) / :link(dir,name,child) -> Error / :unlink(dir,name) / :move(...)
 //    store:setContent / :setTarget / :setRdev
 //    store:readdir(dir) -> { {name=,node=}, ... }   store:parents(node) -> { node, ... }
+//    store:readdirPage(dir, after, max) -> { entries={{name=,node=},...}, cookie=, eof= }
 //    store:now() / :setTime(t)   -- logical clock (deterministic, script-driven)
 //    store:snapshot([label]) -> id   :snapInfo(id) -> {id,ctime,label}
 //    store:diffNodes(a,b)   :diffPaths(a,b)   :stats()   :fsStat()
@@ -53,6 +54,19 @@ sol::table readdirLua(IPrfs& s, Node dir, sol::this_state ts) {
         out[i++] = lua.create_table_with("name", name, "node", node);
     }
     return out;
+}
+
+sol::table readdirPageLua(IPrfs& s, Node dir, std::string const& after, size_t max,
+                          sol::this_state ts) {
+    sol::state_view lua(ts);
+    DirPage p = s.readdirPage(dir, after, max);
+    sol::table ents = lua.create_table();
+    int i = 1;
+
+    for (auto const& [name, node] : p.entries) {
+        ents[i++] = lua.create_table_with("name", name, "node", node);
+    }
+    return lua.create_table_with("entries", ents, "cookie", p.cookie, "eof", p.eof);
 }
 
 sol::table parentsLua(IPrfs& s, Node node, sol::this_state ts) {
@@ -207,6 +221,7 @@ void registerLua(sol::state_view lua) {
         "setTarget", &IPrfs::setTarget,       //
         "setRdev", &IPrfs::setRdev,           //
         "readdir", &readdirLua,               //
+        "readdirPage", &readdirPageLua,       //
         "parents", &parentsLua,               //
         "now", &IPrfs::now,                   //
         "setTime", &IPrfs::setTime,           //

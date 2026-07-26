@@ -108,4 +108,17 @@ assert(sd and sd:type() == prfs.Type.DIR and sd:mode() == 0x16d) -- 0555
 assert(#s:readdir(sd) >= 1, ".snapshot lists snapshots")
 assert(s:link(root, prfs.SNAPSHOT_NAME, s:mkfile("")) == prfs.Error.INVAL, "name reserved")
 
+-- paginated readdir ---------------------------------------------------------
+local full = s:readdir(root)
+local paged, cookie = {}, ""
+while true do
+    local pg = s:readdirPage(root, cookie, 2)
+    for _, e in ipairs(pg.entries) do
+        paged[#paged + 1] = e.name
+    end
+    if pg.eof then break end
+    cookie = pg.cookie
+end
+assert(#paged == #full, "paged readdir reassembles the full listing")
+
 print("prfs lua smoke: OK")

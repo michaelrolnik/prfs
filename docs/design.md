@@ -475,6 +475,28 @@ question as a hybrid: index for candidates, comparison for truth.
 And since range-back yields per-snapshot `mtime`, `diff` can also be expressed as an **mtime
 window** to test mtime-based incrementals specifically.
 
+### 6.2 Paginated readdir (stable cursor)
+
+NFS `READDIR` is paginated and the live directory can change between calls, so the cursor must
+survive concurrent mutation. `readdirPage(dir, after, max)` returns up to `max` entries whose
+name is `> after` (empty `after` starts), plus the last name as the resume `cookie` and an
+`eof` flag.
+
+The cursor **is the entry name**, and entries are stored name-ordered — so it is inherently
+stable, needing no NFS `cookieverf`:
+
+- Every entry present for the whole scan is returned **exactly once**.
+- An entry added **ahead** of the cursor (name `> cookie`) shows up in a later page; one added
+  **behind** it (already passed) does not.
+- An entry removed before the cursor reaches it is simply not returned; removing the cursor's
+  own entry still resumes correctly (`seek` floors to the next name).
+- `eof` is set as soon as the end is known, so a page that exactly consumes the rest reports
+  `eof` in the same call — no wasted empty round-trip.
+
+Frozen snapshot views are immutable, so pagination over them is trivially stable. The
+synthesized `.snapshot` dir paginates by snapId (numeric cursor). Mapping the string cookie to
+a 64-bit NFS cookie (for names that don't fit) is an NFS-front-end concern (L2).
+
 ---
 
 ## 7. Library interface (sketch)

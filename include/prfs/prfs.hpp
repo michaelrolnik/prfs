@@ -90,6 +90,15 @@ struct PathDiff {
     uint64_t child;
 };
 
+//  A page of directory entries with a resume cursor (design §6.2). The cursor is
+//  the last entry's name — opaque to the caller, and stable across concurrent
+//  add/remove: resuming returns the entries ordered after it, each exactly once.
+struct DirPage {
+    std::vector<std::pair<std::string, Node>> entries;
+    std::string cookie; // pass as `after` to continue; "" = start / nothing more
+    bool eof = false;   // true when this page reached the end of the directory
+};
+
 class IPrfs {
 public:
     virtual ~IPrfs() = default;
@@ -121,6 +130,9 @@ public:
 
     //  iteration (vectors for now; streaming iterators are a later refinement)
     virtual std::vector<std::pair<std::string, Node>> readdir(Node dir) = 0;
+    //  Paginated readdir: up to `max` entries after cursor `after` ("" starts).
+    //  Stable under concurrent mutation (design §6.2); frozen views never change.
+    virtual DirPage readdirPage(Node dir, std::string const& after, size_t max) = 0;
     virtual std::vector<Node> parents(Node node) = 0;
 
     //  logical clock (design §3) — deterministic, script-driven, never wall-clock.

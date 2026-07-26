@@ -281,6 +281,56 @@ public:
         return out;
     }
 
+    DirPage readdirPage(Node dir, std::string const& after, size_t max) override {
+        DirPage page;
+
+        //  .snapshot dir: entries "N" paginate by snapId (numeric cursor).
+        if (isSnapDir(dir->id())) {
+            uint64_t base = snapBase(dir->id());
+            SnapId start = 1;
+            SnapId c;
+            if (!after.empty() && parseSnap(after, c)) {
+                start = c + 1;
+            }
+            for (SnapId n = start; n < m_cur; ++n) {
+                if (!effR(base, n)) {
+                    continue;
+                }
+                if (page.entries.size() == max) {
+                    return page; // eof stays false: more remain
+                }
+                page.entries.push_back({std::to_string(n), handle(base, n)});
+                page.cookie = std::to_string(n);
+            }
+            page.eof = true;
+            return page;
+        }
+
+        //  Normal dir: name cursor over the ordered name set — stable across
+        //  concurrent add/remove.
+        auto ni = m_names.find(dir->id());
+        if (ni == m_names.end()) {
+            page.eof = true;
+            return page;
+        }
+        for (auto const& name : ni->second) { // std::set → ascending
+            if (name <= after) {
+                continue;
+            }
+            uint64_t child;
+            if (!linkLiveAt({dir->id(), name}, dir->snap(), child)) {
+                continue; // dead in this view
+            }
+            if (page.entries.size() == max) {
+                return page; // eof stays false: at least one more entry exists
+            }
+            page.entries.push_back({name, handle(child, dir->snap())});
+            page.cookie = name;
+        }
+        page.eof = true;
+        return page;
+    }
+
     std::vector<Node> parents(Node node) override {
         std::set<uint64_t> seen;
         std::vector<Node> out;
