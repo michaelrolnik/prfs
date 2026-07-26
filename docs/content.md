@@ -54,7 +54,8 @@ those verbatim and skips the generator. Procedural files — the common case —
    returns a short count (EOF). The generator produces exactly `size` bytes of geometry.
 4. **The knobs a backup/archive tool cares about, FS-wide:**
    - **entropy** — bits/byte; *compressibility is the derived `1 − entropy/8`*.
-   - **dedup** — a global pool of `U` distinct blocks shared across the whole FS.
+   - **dedup** — `dedupPercent`, the share of blocks that are duplicates of an FS-wide corpus;
+     dedup ratio ≈ `1 / (1 − dedupPercent/100)`, **independent of total size**.
    - **sparseness** — a fraction of blocks that are holes (unallocated, read as zeros).
 
 ---
@@ -66,15 +67,23 @@ struct ContentConfig {
     uint32_t blockSize     = 4096;  // generation & dedup granularity (D3)
     uint8_t  entropy       = 255;   // 0..255 ⇒ 0..8 bits/byte (255 = incompressible)
     uint8_t  sparsePercent = 0;     // 0..100: share of a file's blocks that are holes
-    uint64_t dedupPool     = 0;     // 0 = every block unique; N = N distinct blocks FS-wide
+    uint8_t  dedupPercent  = 0;     // 0..100: share of blocks that are duplicates
+    uint32_t dedupCorpus   = 65536; // # distinct shared blocks the duplicates draw from
 };
 
-serialize:   magic("PCC1") ‖ blockSize:u32 ‖ entropy:u8 ‖ sparsePercent:u8 ‖ pad ‖ dedupPool:u64
+serialize:  magic("PCC1") ‖ blockSize:u32 ‖ entropy:u8 ‖ sparsePercent:u8
+            ‖ dedupPercent:u8 ‖ pad:u8 ‖ dedupCorpus:u32
 ```
 
 `blockSize` is FS-level (a per-folder override is the only finer grain, §1) — never per-file.
-It feeds `statfs f_bsize` and the FSINFO transfer granularity (design §9). `entropy` and
-`dedupPool` are the compression- and dedup-ratio dials; `sparsePercent` the sparse dial.
+It feeds `statfs f_bsize` and the FSINFO transfer granularity (design §9).
+
+**Dedup dial.** `dedupPercent` sets what fraction of blocks are duplicates, giving a
+**size-independent** dedup ratio ≈ `1 / (1 − dedupPercent/100)` (0 = no dedup). `dedupCorpus` is
+the number of distinct "popular" blocks those duplicates share across the whole FS — a
+secondary variety knob; it only needs to be ≪ the number of duplicate blocks for the ratio to
+fully manifest, which always holds for a large tree. `entropy` is the compression dial,
+`sparsePercent` the sparse dial.
 
 ---
 
@@ -100,11 +109,12 @@ For file `S`, block `b`, config `C`:
 
 1. **Sparse?** `isHole = h(S, b, HOLE_TAG) % 100 < C.sparsePercent`. If so the block is zeros and
    is **not** counted in `st_blocks` (§5); done.
-2. **Pick the block's source seed:**
-   - `C.dedupPool == 0`: `src = h(S, b, DATA_TAG)` — unique per (file, block).
-   - else: `canon = h(S, b, DEDUP_TAG) % C.dedupPool; src = h(0, canon, POOL_TAG)` — the pool is
-     keyed on `0` (not `S`), so identical `canon` across *different files* yields identical
-     blocks → **cross-file dedup**, ratio ≈ totalBlocks / `dedupPool`.
+2. **Duplicate or unique?** `isDup = h(S, b, DUP_TAG) % 100 < C.dedupPercent`.
+   - **duplicate:** `canon = h(S, b, DUP2_TAG) % C.dedupCorpus; src = h(CORPUS_BASE, canon,
+     CORPUS_TAG)`. The corpus is keyed on the global `CORPUS_BASE` (not `S`), so the same `canon`
+     in *different files* yields identical block content → **cross-file dedup**. Ratio ≈
+     `1 / (1 − dedupPercent/100)`, independent of total size.
+   - **unique:** `src = h(S, b, DATA_TAG)` — unique per (file, block).
 3. **Fill at target entropy.** With `K = clamp(round(2^(8·entropy/255)), 1, 256)` equiprobable
    symbols: word `j` of the block is `mix64(src + j·GOLDEN)`; each output byte becomes
    `symbol = value % K` mapped to `symbol·255/(K−1)` (or `0` when `K==1`). The stream then
@@ -132,7 +142,8 @@ file.
 namespace prfs::content {
 
 struct ContentConfig { uint32_t blockSize = 4096; uint8_t entropy = 255;
-                       uint8_t sparsePercent = 0; uint64_t dedupPool = 0; };
+                       uint8_t sparsePercent = 0; uint8_t dedupPercent = 0;
+                       uint32_t dedupCorpus = 65536; };
 
 std::string   serialize(ContentConfig const&);
 ContentConfig deserialize(std::string_view);       // throws on bad magic/format
@@ -165,8 +176,9 @@ Each behaviour gets a failing test before code (`tests/content/*`):
 - **Size/EOF** — reads clamp to `size`; `offset ≥ size` → 0.
 - **Entropy** — measured byte-alphabet size / order-0 entropy tracks `entropy` monotonically;
   `entropy=255` uses ~all 256 values, `entropy=0` is constant.
-- **Dedup** — with `dedupPool=U`, the number of distinct block contents across many files is
-  ≤ `U`; two different files share blocks when `canon` collides; `dedupPool=0` → all unique.
+- **Dedup** — `dedupPercent=0` → every block distinct; `dedupPercent>0` → ≈ that share of blocks
+  are duplicates and the measured dedup ratio over a large sample tracks `1/(1−dedupPercent/100)`;
+  two different files produce byte-identical blocks when their `canon` collides in the corpus.
 - **Sparse** — ≈ `sparsePercent` of blocks are holes; holes read zero and are excluded from
   `allocatedBlocks`.
 - **Config round-trip** — `deserialize(serialize(c)) == c`; bad magic / truncated is a hard error.

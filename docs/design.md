@@ -726,7 +726,8 @@ file's bytes are a pure function of `(effective config, nodeID, offset)`, and pe
 (which blocks are holes, which dedup-pool block) falls out of hashing the node id. Config
 granularity is the **whole filesystem** (mandatory, one record in `meta`) with an optional
 **per-folder override** (inherited; nice-to-have). Knobs: `blockSize`, `entropy` (bits/byte),
-`dedupPool` (FS-wide unique-block count), `sparsePercent`. Size-authoritative (§2.1/T7): the
+`dedupPercent` (share of blocks that are duplicates → size-independent dedup ratio ≈
+`1/(1−dedupPercent/100)`), `sparsePercent`. Size-authoritative (§2.1/T7): the
 node's `size` bounds output. Specified in [`docs/content.md`](content.md) (L1).
 
 ### 11.3 Block size — **filesystem-level (+ folder override); not per-file** (D3)

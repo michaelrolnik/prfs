@@ -57,7 +57,7 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 ## Decisions (design §11)
 
 - **D1** ✅ — Link-set scaling: **range-partitioned bucketed COW** (design §11.1). One read/write path, copy bounded to the touched bucket, buckets partitioned by name range so the §6.2 readdir cursor stays stable. v1 ships single-bucket (== pure COW §3.3); multi-bucket + `linkMode`/bucket-count reserved.
-- **D2** ✅ — Content: **config-driven, generated on the fly; nothing stored** (design §11.2). A file's bytes = f(effective `ContentConfig`, `nodeID` seed, offset); no per-file recipe. Config is FS-wide (in `meta`) with an optional per-folder override (nice-to-have). Knobs: `blockSize`, `entropy`, `dedupPool`, `sparsePercent`. Spec'd in `docs/content.md` (L1).
+- **D2** ✅ — Content: **config-driven, generated on the fly; nothing stored** (design §11.2). A file's bytes = f(effective `ContentConfig`, `nodeID` seed, offset); no per-file recipe. Config is FS-wide (in `meta`) with an optional per-folder override (nice-to-have). Knobs: `blockSize`, `entropy`, `dedupPercent` (size-independent dedup ratio), `sparsePercent`. Spec'd in `docs/content.md` (L1).
 - **D3** ✅ — Block size: **filesystem-level** (+ optional per-folder override), part of `ContentConfig`; **not per-file**, not denormalized on nodes (design §11.3).
 - **D4** ✅ — `changes`: candidate index + state-comparison (design §6.1).
 - **D5** ✅ — GC: **invariant fixed now, compaction later** (design §11.4). Reclaimable ⟺ no retained snapshot resolves to it; inert until snapshot pruning + content refcounting exist.
