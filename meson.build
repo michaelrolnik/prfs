@@ -242,6 +242,18 @@ if get_option('plugins')
         dependencies        : bigtree_deps,
     )
 
+    #   perf — read-performance benchmark front-end (→ perf.so). Times the content
+    #   generator (single/multi-thread); links prfs_content_dep when content is on.
+    perf_so = shared_module(
+        'perf',
+        'plugins/perf/perf.cpp',
+        include_directories : [prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],
+        cpp_args            : bigtree_args,
+        name_prefix         : '',
+        dependencies        : bigtree_deps + [threads_dep],
+    )
+
     #   nfsv3 front-end service (→ nfsv3.so). Asio coroutines + threads + spdlog;
     #   prfs_nfs_dep bakes the FSSTAT/FSINFO projection into the module so it has
     #   no undefined symbols at dlopen (the host is loaded RTLD_LOCAL).
@@ -313,6 +325,7 @@ fmt_files = files(
     'plugins/nfsv3/nfsv3.cpp',
     'plugins/luactl/luactl.cpp',
     'plugins/bigtree/bigtree.cpp',
+    'plugins/perf/perf.cpp',
     'tests/host/host_test.cpp',
     'tests/nfsv3/nfsv3_test.cpp',
     'tests/luactl/luactl_test.cpp',
