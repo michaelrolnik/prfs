@@ -9,7 +9,7 @@ Status: ✅ done · ⬜ open.
 
 | ID  | Status | Task                                                                        |
 | --- | ------ | --------------------------------------------------------------------------- |
-| T1  | ⬜     | Directory DAG: DFS cycle-prevention on dir link/move (fixes B1)             |
+| T1  | ✅     | Directory DAG: DFS cycle-prevention on dir link/move (fixes B1)             |
 | T2  | ✅     | `diffNodes` / `diffPaths` design (fixes B2)                                 |
 | T3  | ⬜     | `snaps: snapId → {ctime, label}` table (fixes B3)                           |
 | T4  | ⬜     | `readdir` cookies + live-dir mutate-mid-scan (fixes B4)                     |
@@ -44,7 +44,7 @@ Status: ✅ done · ⬜ open.
 
 ## Design gaps to close (before / with scaffolding)
 
-- **T1** ⬜ — directory DAG (design §2.2): DFS cycle-prevention on dir link/move (files skip, early-exit). Store `nlink = #incoming` (+ optional per-dir subdir counter for POSIX-compat). NFS-front-end tasks (not `libprfs`): `..` = **via-parent** (filehandle-encoded, depth-bounded chain); dir-`nlink` reporting mode (POSIX-compat default / faithful). (fixes B1)
+- **T1** ✅ — directory DAG (design §2.2): DFS cycle-prevention on dir link/move — `link`/`move` reject a cycle-closing directory edge via `reachable(child, dir)` over directory down-links; files skip it, self-links caught, `move` links-before-unlinks so it's covered and atomic. Store keeps `nlink = #incoming`. Both engines; hardened by `tests/core/dag.cpp` (7 cases × 2 engines). Fixes B1. *Carved out to the NFS front-end (todo L2, not `libprfs`):* `..` = **via-parent** (filehandle-encoded, depth-bounded chain); dir-`nlink` reporting mode (POSIX-compat `2 + #subdirs` default / faithful `#parents`).
 - **T2** ✅ — design done (fixes B2): `diffNodes(A,B)` = node-level state comparison + on-demand `diffPaths` over a `changes` candidate index (design §6.1). Implementation tracked under Scaffolding.
 - **T3** ⬜ — add `snaps: snapId → {ctime, label}` table; `snapshot()` writes it (fixes B3).
 - **T4** ⬜ — define `readdir` cookies + live-dir mutate-mid-scan behaviour (fixes B4).
@@ -80,6 +80,6 @@ Status: ✅ done · ⬜ open.
 ## Later / separate modules
 
 - **L1** ⬜ — **Content provider** (own doc): block/pattern model (ZERO/ONE/RANDOM/SEEDED/DEDUP), procedural knobs, dedup.
-- **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis.
+- **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis. Includes the T1 carve-outs: `..` via-parent resolution (filehandle-encoded ancestor chain) and directory-`nlink` reporting mode (POSIX-compat default / faithful).
 - **L3** ⬜ — **GC / compaction**: reclaim superseded link-set versions + unreferenced `content`/`strings`.
 - **L4** ⬜ — **Dedup-ratio stats** (phase-2): content refcounting (`logicalSize` vs `physicalSize`).

@@ -7,7 +7,7 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 
 | ID  | Sev | Status | Title                                                  | TODO |
 | --- | --- | ------ | ------------------------------------------------------ | ---- |
-| B1  | 🔴  | ⬜     | Directory cycles must be prevented (multi-parent DIRs) | T1   |
+| B1  | 🔴  | ✅     | Directory cycles must be prevented (multi-parent DIRs) | T1   |
 | B2  | 🟡  | ✅     | `diff` / `changes` semantics undefined                 | T2   |
 | B3  | 🟠  | ⬜     | Snapshot metadata lost                                 | T3   |
 | B4  | 🟠  | ⬜     | `readdir` pagination on a live directory               | T4   |
@@ -20,16 +20,6 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 ---
 
 ## Details
-
-### B1 — directory cycles must be prevented (multi-parent DIRs allowed) 🔴 ⬜
-
-Directories are multi-parent by design (DAG, design §2.2), so a directory link/move could close
-a **cycle** → an **infinite loop for a tree-walking archiver**. Fix: reject a cycle-closing
-directory link/move via a boolean **DFS reachability check** (files skip it; early-exit). Two
-attached sub-decisions: `..` resolution = **via-parent** (filehandle-encoded, depth-bounded
-ancestor chain; an NFS-front-end concern, not the store) and directory `nlink`: store keeps the
-true `#incoming` count; the front-end reports POSIX-compat (`2 + #subdirs`, default) or faithful
-(`#parents`) — a test knob. → T1.
 
 ### B3 — snapshot metadata lost 🟠 ⬜
 
@@ -66,6 +56,22 @@ The `nodes` value already carries `linkMode`, but the COW-vs-hybrid choice (desi
 undecided — the schema commits to an unbuilt feature. Mark it reserved or defer. → T8.
 
 ## Resolved
+
+### B1 — directory cycles must be prevented (multi-parent DIRs allowed) 🔴 ✅
+
+Directories are multi-parent by design (DAG, design §2.2), so a directory link/move could close a
+**cycle** → an **infinite loop for a tree-walking archiver**. Fixed: `link`/`move` reject a
+cycle-closing directory edge via a boolean **DFS reachability check** over directory down-links
+(`reachable(child, dir)` — reject when `dir` is reachable from `child`). Files skip the check
+(they can't close a directory cycle) and self-links are caught (`from==to`); `move` is covered
+because it links before it unlinks, and the reject path writes nothing (atomic). Both engines
+implement it independently; validated by `tests/core/dag.cpp` (self-link, transitive cycle,
+multi-parent/diamond allowed, files unrestricted, move-into-own-subtree, dynamic re-evaluation)
+and by the differential/invariant harnesses. Store keeps the true `nlink = #incoming`.
+
+Carved out to the **NFS front-end** (not `libprfs`, tracked under todo L2): `..` resolution =
+**via-parent** (filehandle-encoded, depth-bounded ancestor chain), and directory-`nlink`
+reporting mode — POSIX-compat (`2 + #subdirs`, default) vs faithful (`#parents`).
 
 ### B2 — `diff` / `changes` semantics 🟡 ✅
 

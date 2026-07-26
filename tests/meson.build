@@ -10,6 +10,7 @@ test_inc = include_directories('.')
 #   engine-specific. name → source, followed by an optional per-test timeout.
 tests = [
     ['contract', 'core/contract.cpp', 60],
+    ['dag', 'core/dag.cpp', 60],
     ['differential', 'core/differential.cpp', 120],
     ['invariant', 'core/invariant.cpp', 120],
     ['determinism', 'core/determinism.cpp', 120],
