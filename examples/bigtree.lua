@@ -2,13 +2,14 @@
 -- Copyright (c) 2026 Michael Rolnik <mrolnik@gmail.com>
 --
 -- bigtree — build a large, RANDOMLY-SHAPED synthetic filesystem and snapshot it.
--- At each level a seeded RNG picks how many subfolders and how many files to
--- create, so the tree is irregular like a real one — but fully reproducible: the
--- same seed always builds the same tree. Because prfs GENERATES content (never
--- stores it), a multi-terabyte tree is only a few MB of metadata.
+-- At each level a seeded RNG picks how many subfolders, files, hardlinks, and
+-- symlinks to create, so the tree is irregular like a real one — but fully
+-- reproducible: the same seed always builds the same tree. Because prfs
+-- GENERATES content (never stores it), a multi-terabyte tree is only a few MB of
+-- metadata.
 --
--- The leaf/interior files are sized so the whole tree sums to a target total,
--- a filesystem-wide content policy is set, and several snapshots are taken.
+-- Files are sized so the whole tree sums to a target total, a filesystem-wide
+-- content policy is set, and several snapshots are taken.
 --
 -- Build a persistent store, then serve it over NFS:
 --   ./build/prfs-test examples/bigtree.lua /tmp/prfs-big 4 5 8
@@ -24,6 +25,10 @@ local maxDirs  = tonumber(arg[3] or 5)                          -- up to this ma
 local maxFiles = tonumber(arg[4] or 8)                          -- up to this many files per dir
 local total    = tonumber(arg[5] or (1024 * 1024 * 1024 * 1024)) -- 1 TiB
 local seed     = tonumber(arg[6] or 42)
+
+-- Hardlinks / symlinks per dir scale with maxFiles.
+local maxHard = math.floor(maxFiles / 4)
+local maxSym  = math.floor(maxFiles / 3)
 
 math.randomseed(seed) -- reproducible: same seed → same tree
 
@@ -41,33 +46,49 @@ if prfs.content then
   })
 end
 
-local allFiles = {} -- every file, so we can size them to hit `total`
-local dirs, id = 0, 0
+local files = {}                          -- { {node=, path=}, ... } — every regular file
+local dirs, hard, sym, id = 0, 0, 0, 0
 local function uniq() id = id + 1; return id end
 
--- At each directory: a random number of files, and (until max depth) a random
--- number of subdirectories to recurse into.
-local function build(dir, level)
+-- At each directory: a random number of files, hardlinks to random existing
+-- files, symlinks to random existing files, and (until max depth) subdirs.
+local function build(dir, prefix, level)
   for _ = 1, math.random(0, maxFiles) do
+    local name = string.format("file-%d.bin", uniq())
     local f = fs:mkfile("")
-    fs:link(dir, string.format("file-%d.bin", uniq()), f)
-    allFiles[#allFiles + 1] = f
+    fs:link(dir, name, f)
+    files[#files + 1] = { node = f, path = prefix .. "/" .. name }
   end
+
+  if #files > 0 then
+    for _ = 1, math.random(0, maxHard) do -- hardlink: a second edge to an existing file
+      local tgt = files[math.random(#files)]
+      fs:link(dir, string.format("hardlink-%d.bin", uniq()), tgt.node)
+      hard = hard + 1
+    end
+    for _ = 1, math.random(0, maxSym) do -- symlink pointing at an existing file
+      local tgt = files[math.random(#files)]
+      fs:link(dir, string.format("symlink-%d", uniq()), fs:symlink(tgt.path))
+      sym = sym + 1
+    end
+  end
+
   if level < depth then
     for _ = 1, math.random(1, maxDirs) do -- >=1 so the tree keeps growing
+      local name = string.format("dir-%d", uniq())
       local d = fs:mkdir()
       dirs = dirs + 1
-      fs:link(dir, string.format("dir-%d", uniq()), d)
-      build(d, level + 1)
+      fs:link(dir, name, d)
+      build(d, prefix .. "/" .. name, level + 1)
     end
   end
 end
 
-build(fs:root(), 1)
+build(fs:root(), "", 1)
 
 -- Distribute the target total across all files (content is generated to size).
-local fsize = math.max(1, math.floor(total / math.max(1, #allFiles)))
-for _, f in ipairs(allFiles) do f:setSize(fsize) end
+local fsize = math.max(1, math.floor(total / math.max(1, #files)))
+for _, f in ipairs(files) do f.node:setSize(fsize) end
 
 -- Snapshot the freshly built tree, then a few "daily" rounds: modify a couple
 -- of existing files (content + attrs) and add a directory of new files.
@@ -75,8 +96,8 @@ local snaps = { fs:snapshot("base") }
 for day = 1, 3 do
   t = t + 86400
   fs:setTime(t)
-  if allFiles[1] then fs:setContentSeed(allFiles[1], 1000 + day) end -- MODIFIED_CONTENT
-  if allFiles[2] then allFiles[2]:setMode(0600 + day) end            -- MODIFIED_ATTRS
+  if files[1] then fs:setContentSeed(files[1].node, 1000 + day) end -- MODIFIED_CONTENT
+  if files[2] then files[2].node:setMode(0600 + day) end            -- MODIFIED_ATTRS
 
   local d = fs:mkdir()
   fs:link(fs:root(), "day-" .. day, d)
@@ -84,7 +105,7 @@ for day = 1, 3 do
     local f = fs:mkfile("")
     f:setSize(fsize)
     fs:link(d, string.format("new-%d.bin", uniq()), f)
-    allFiles[#allFiles + 1] = f
+    files[#files + 1] = { node = f, path = "/day-" .. day }
   end
   snaps[#snaps + 1] = fs:snapshot("day-" .. day)
 end
@@ -99,7 +120,8 @@ end
 local st = fs:stats()
 print(string.format("built %s: depth<=%d maxDirs=%d maxFiles=%d seed=%d", path, depth, maxDirs,
   maxFiles, seed))
-print(string.format("  files=%d dirs=%d links=%d", #allFiles, st.nodes[1], st.links))
+print(string.format("  files=%d dirs=%d symlinks=%d hardlinks=%d links=%d",
+  #files, st.nodes[1], st.nodes[2], hard, st.links))
 print(string.format("  logical size = %s  (nothing stored — content is generated)",
   human(st.totalSize)))
 print("  snapshots (id): " .. table.concat(snaps, ", "))
