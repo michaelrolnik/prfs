@@ -744,8 +744,10 @@ GC-safe by construction.
 
 ### 11.5 Content provider contract (L1)
 
-The block-structure format and the block/pattern model live **outside this library** and get
-their own doc/module (`libprfs_content`, todo L1), consuming the §11.2 extent/recipe layout.
+The block-structure format and the block/pattern model live **outside this library** in their
+own module (`libprfs_content`, todo L1), consuming the §11.2 extent/recipe layout and §11.3
+block size. Specified in **[`docs/content.md`](content.md)**: recipe format, deterministic
+random-access generator, patterns (hole/zero/fill/random/dedup), API, and test plan.
 
 ---
 

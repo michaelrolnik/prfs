@@ -5,7 +5,7 @@ Living task list. `T*` items fix the correspondingly-numbered risks in `bugs.md`
 > **Every task follows design §13 — SOLID and test-first (a failing test first, then code to
 > green against the reference oracle). Non-negotiable.**
 
-Status: ✅ done · ⬜ open.
+Status: ✅ done · 🚧 in progress · ⬜ open.
 
 | ID  | Status | Task                                                                        |
 | --- | ------ | --------------------------------------------------------------------------- |
@@ -35,7 +35,7 @@ Status: ✅ done · ⬜ open.
 | S10 | ✅     | Extend tests: invariant/property, determinism, crash-safety                 |
 | S11 | ✅     | `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12)                  |
 | S12 | ✅     | Statistics (§9): `FSSTAT`/`FSINFO` mapping                                  |
-| L1  | ⬜     | Content provider (own doc): block/pattern model, dedup                      |
+| L1  | 🚧     | Content provider (`libprfs_content`): doc done (content.md), impl next      |
 | L2  | ⬜     | NFS front-end: v3 first; v4 subset or NFS-Ganesha FSAL                      |
 | L3  | ⬜     | GC / compaction: reclaim superseded link-set versions + unref content       |
 | L4  | ⬜     | Dedup-ratio stats (phase-2): content refcounting                            |
@@ -79,7 +79,7 @@ Status: ✅ done · ⬜ open.
 
 ## Later / separate modules
 
-- **L1** ⬜ — **Content provider** (own doc): block/pattern model (ZERO/ONE/RANDOM/SEEDED/DEDUP), procedural knobs, dedup.
+- **L1** 🚧 — **Content provider** (`libprfs_content`). Design doc done: [`docs/content.md`](content.md) — recipe = extent list of procedural recipes (§11.2), deterministic random-access generator (counter-based mixer), patterns hole/zero/fill/random/dedup, size authority (T7), block size (D3), API + test plan. **Next: implement test-first** (`src/content/`, `tests/content/`, Lua `prfs.content`).
 - **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis. Includes the T1 carve-outs: `..` via-parent resolution (filehandle-encoded ancestor chain) and directory-`nlink` reporting mode (POSIX-compat default / faithful).
 - **L3** ⬜ — **GC / compaction**: reclaim superseded link-set versions + unreferenced `content`/`strings`.
 - **L4** ⬜ — **Dedup-ratio stats** (phase-2): content refcounting (`logicalSize` vs `physicalSize`).
