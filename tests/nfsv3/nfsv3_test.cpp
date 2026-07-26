@@ -4,10 +4,11 @@
 //
 //  nfsv3 plugin — end-to-end RPC test. Loads nfsv3.so via the host, then over a
 //  TCP connection walks the real client flow: MOUNT MNT to obtain the root
-//  filehandle, then the read-only NFS surface (GETATTR/LOOKUP/ACCESS/READ/
-//  READLINK/READDIR/READDIRPLUS/FSSTAT/FSINFO/PATHCONF) against the live store
-//  the host wraps. Proves the transport (record marking + call/reply) and the
-//  XDR / filehandle mapping. NFSV3_PLUGIN_SO is the .so path.
+//  filehandle, then the read surface (GETATTR/LOOKUP/ACCESS/READ/READLINK/
+//  READDIR/READDIRPLUS/FSSTAT/FSINFO/PATHCONF) and the write surface (MKDIR/
+//  CREATE/WRITE/SETATTR/REMOVE/RMDIR, plus a snapshot-fh ROFS check) against the
+//  live store the host wraps. Proves the transport (record marking + call/reply)
+//  and the XDR / filehandle mapping. NFSV3_PLUGIN_SO is the .so path.
 //
 #include "prfs/host.hpp"
 #include "prfs/memstore.hpp"
@@ -152,6 +153,7 @@ TEST(NfsV3, MountWalkStat) {
     ASSERT_EQ(fs->link(root, "hello", file), Error::OK);
     auto lnk = fs->symlink("/target/path");
     ASSERT_EQ(fs->link(root, "lnk", lnk), Error::OK);
+    uint64_t snapId = fs->snapshot(); // a read-only past view
     uint64_t rootId = root->id();
     uint64_t fileId = file->id();
     uint64_t lnkId = lnk->id();
@@ -371,6 +373,93 @@ TEST(NfsV3, MountWalkStat) {
     ASSERT_EQ(fsi.astat, 0u);
     EXPECT_EQ(get32(&fsi.body[0]), 0u);        // NFS3_OK
     EXPECT_EQ(get32(&fsi.body[92]), 1u << 20); // rtmax
+
+    //  ---- write surface ----
+    auto sattrNone = [](std::vector<uint8_t>& a) {
+        for (int i = 0; i < 6; ++i) {
+            put32(a, 0); // mode/uid/gid/size unset; atime/mtime DONT_CHANGE
+        }
+    };
+
+    //  MKDIR "sub" under the root, then confirm LOOKUP resolves it.
+    std::vector<uint8_t> mkd = fhArg(fhId, fhSnap);
+    std::vector<uint8_t> subn = strArg("sub");
+    mkd.insert(mkd.end(), subn.begin(), subn.end());
+    sattrNone(mkd);
+    EXPECT_EQ(rpc(fd, PROG_NFS, NFS_V3, 9, mkd).body[3], 0u); // status low byte == NFS3_OK
+    std::vector<uint8_t> lsub = fhArg(fhId, fhSnap);
+    std::vector<uint8_t> lsubn = strArg("sub");
+    lsub.insert(lsub.end(), lsubn.begin(), lsubn.end());
+    EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 3, lsub).body[0]), 0u); // LOOKUP OK
+
+    //  CREATE "file.txt" (UNCHECKED) → a new file handle.
+    std::vector<uint8_t> cr = fhArg(fhId, fhSnap);
+    std::vector<uint8_t> crn = strArg("file.txt");
+    cr.insert(cr.end(), crn.begin(), crn.end());
+    put32(cr, 0); // createmode3 UNCHECKED
+    sattrNone(cr);
+    Reply crr = rpc(fd, PROG_NFS, NFS_V3, 8, cr);
+    ASSERT_EQ(crr.astat, 0u);
+    ASSERT_EQ(get32(&crr.body[0]), 0u);  // NFS3_OK
+    ASSERT_EQ(get32(&crr.body[4]), 1u);  // handle-follows
+    ASSERT_EQ(get32(&crr.body[8]), 16u); // fh length
+    uint64_t newId = get64(&crr.body[12]);
+    uint64_t newSnap = get64(&crr.body[20]);
+
+    //  WRITE "payload!" at offset 0.
+    std::string payload = "payload!";
+    std::vector<uint8_t> wr = fhArg(newId, newSnap);
+    putU64(wr, 0);                             // offset
+    put32(wr, uint32_t(payload.size()));       // count
+    put32(wr, 2);                              // stable_how FILE_SYNC
+    std::vector<uint8_t> pl = strArg(payload); // data<>
+    wr.insert(wr.end(), pl.begin(), pl.end());
+    Reply wrr = rpc(fd, PROG_NFS, NFS_V3, 7, wr);
+    ASSERT_EQ(wrr.astat, 0u);
+    EXPECT_EQ(get32(&wrr.body[0]), 0u); // NFS3_OK
+    //  status(4) + wcc pre(28) + wcc post(88) → count at 120.
+    EXPECT_EQ(get32(&wrr.body[120]), 8u); // count written
+
+    //  READ it back → the same bytes.
+    std::vector<uint8_t> rb = fhArg(newId, newSnap);
+    putU64(rb, 0);
+    put32(rb, 100);
+    Reply rbr = rpc(fd, PROG_NFS, NFS_V3, 6, rb);
+    ASSERT_EQ(rbr.astat, 0u);
+    EXPECT_EQ(get32(&rbr.body[92]), 8u); // count
+    EXPECT_EQ(std::string(reinterpret_cast<char const*>(&rbr.body[104]), 8), "payload!");
+
+    //  SETATTR: truncate to 4 bytes, then READ sees the shorter file.
+    std::vector<uint8_t> sa = fhArg(newId, newSnap);
+    put32(sa, 0);                                                    // set_mode3 no
+    put32(sa, 0);                                                    // set_uid3 no
+    put32(sa, 0);                                                    // set_gid3 no
+    put32(sa, 1);                                                    // set_size3 yes
+    putU64(sa, 4);                                                   // size = 4
+    put32(sa, 0);                                                    // set_atime DONT
+    put32(sa, 0);                                                    // set_mtime DONT
+    put32(sa, 0);                                                    // sattrguard3: no check
+    EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 2, sa).body[0]), 0u); // NFS3_OK
+    Reply rbr2 = rpc(fd, PROG_NFS, NFS_V3, 6, rb);
+    EXPECT_EQ(get32(&rbr2.body[92]), 4u); // count now 4
+
+    //  REMOVE the file and RMDIR the (empty) directory.
+    std::vector<uint8_t> rm = fhArg(fhId, fhSnap);
+    std::vector<uint8_t> rmn = strArg("file.txt");
+    rm.insert(rm.end(), rmn.begin(), rmn.end());
+    EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 12, rm).body[0]), 0u);  // REMOVE OK
+    EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 3, lsub).body[0]), 0u); // "sub" still there
+    std::vector<uint8_t> rd2 = fhArg(fhId, fhSnap);
+    std::vector<uint8_t> rd2n = strArg("sub");
+    rd2.insert(rd2.end(), rd2n.begin(), rd2n.end());
+    EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 13, rd2).body[0]), 0u); // RMDIR OK
+
+    //  Writes through a snapshot fh are refused (read-only view) → NFS3ERR_ROFS.
+    std::vector<uint8_t> ro = fhArg(rootId, snapId);
+    std::vector<uint8_t> ron = strArg("nope");
+    ro.insert(ro.end(), ron.begin(), ron.end());
+    sattrNone(ro);
+    EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 9, ro).body[0]), 30u); // MKDIR → ROFS
 
     ::close(fd);
     loader.stopAll();

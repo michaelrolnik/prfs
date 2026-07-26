@@ -7,11 +7,14 @@
 //  listener, both the MOUNT program (100005 v3: MNT/UMNT/EXPORT) and the NFS
 //  program (100003 v3). Implemented so far: MOUNT MNT hands out the root
 //  filehandle for the single export "/"; NFS NULL, GETATTR, LOOKUP, ACCESS let a
-//  client walk the tree and stat nodes, READ returns file bytes (sourced by the
-//  host — procedural content or literal), READLINK returns a symlink target,
-//  READDIR/READDIRPLUS list directories (with synthesized "." and ".."), and
+//  client walk the tree and stat nodes; READ returns file bytes (sourced by the
+//  host — procedural content or literal); READLINK returns a symlink target;
+//  READDIR/READDIRPLUS list directories (with synthesized "." and ".."); and
 //  FSSTAT/FSINFO/PATHCONF report volume usage, server parameters, and limits
-//  (the libprfs_nfs §9 projection). This covers the read-only NFSv3 surface.
+//  (the libprfs_nfs §9 projection). The write surface — SETATTR, WRITE, CREATE,
+//  MKDIR, SYMLINK, MKNOD, REMOVE, RMDIR, RENAME, LINK, COMMIT — mutates the live
+//  tree (a fh into a snapshot view is read-only → NFS3ERR_ROFS). WRITE splices
+//  into a node's literal content (whole-file model).
 //
 //  Filehandle (nfs_fh3): 16 opaque bytes = big-endian (nodeID, snapId). Decoded
 //  back to a node via IPrfs::nodeById(); a null result maps to NFS3ERR_STALE.
@@ -32,6 +35,7 @@
 #include <asio.hpp>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -54,10 +58,26 @@ constexpr uint32_t SUCCESS = 0, PROG_UNAVAIL = 1, PROG_MISMATCH = 2, PROC_UNAVAI
 //  NFSv3 program (RFC 1813).
 constexpr uint32_t PROG_NFS = 100003;
 constexpr uint32_t NFS_V3 = 3;
-constexpr uint32_t NFSPROC3_NULL = 0, NFSPROC3_GETATTR = 1, NFSPROC3_READLINK = 5,
-                   NFSPROC3_LOOKUP = 3, NFSPROC3_ACCESS = 4, NFSPROC3_READ = 6,
+constexpr uint32_t NFSPROC3_NULL = 0, NFSPROC3_GETATTR = 1, NFSPROC3_SETATTR = 2,
+                   NFSPROC3_LOOKUP = 3, NFSPROC3_ACCESS = 4, NFSPROC3_READLINK = 5,
+                   NFSPROC3_READ = 6, NFSPROC3_WRITE = 7, NFSPROC3_CREATE = 8, NFSPROC3_MKDIR = 9,
+                   NFSPROC3_SYMLINK = 10, NFSPROC3_MKNOD = 11, NFSPROC3_REMOVE = 12,
+                   NFSPROC3_RMDIR = 13, NFSPROC3_RENAME = 14, NFSPROC3_LINK = 15,
                    NFSPROC3_READDIR = 16, NFSPROC3_READDIRPLUS = 17, NFSPROC3_FSSTAT = 18,
-                   NFSPROC3_FSINFO = 19, NFSPROC3_PATHCONF = 20;
+                   NFSPROC3_FSINFO = 19, NFSPROC3_PATHCONF = 20, NFSPROC3_COMMIT = 21;
+
+//  createmode3 (CREATE) and stable_how (WRITE).
+constexpr uint32_t CREATE_UNCHECKED = 0, CREATE_GUARDED = 1, CREATE_EXCLUSIVE = 2;
+constexpr uint32_t WRITE_FILE_SYNC = 2;
+
+//  ftype3 values used by MKNOD.
+constexpr uint32_t NF3BLK = 3, NF3CHR = 4, NF3SOCK = 6, NF3FIFO = 7;
+
+//  set_time enum (SETATTR sattr3): 1 = server time, 2 = client-supplied time.
+constexpr uint32_t SET_TO_SERVER_TIME = 1, SET_TO_CLIENT_TIME = 2;
+
+//  Largest offset+len a literal WRITE may reach (a synthetic target guard).
+constexpr uint64_t MAX_WRITE_FILE = uint64_t(1) << 30;
 
 //  Largest READ we answer in one reply (also the rtmax FSINFO will advertise).
 constexpr uint32_t MAX_READ = 1u << 20;
@@ -79,8 +99,10 @@ constexpr uint32_t MOUNTPROC3_NULL = 0, MOUNTPROC3_MNT = 1, MOUNTPROC3_UMNT = 3,
 constexpr uint32_t MNT3_OK = 0;
 
 //  A subset of nfsstat3.
-constexpr uint32_t NFS3_OK = 0, NFS3ERR_NOENT = 2, NFS3ERR_ISDIR = 21, NFS3ERR_INVAL = 22,
-                   NFS3ERR_NOTDIR = 20, NFS3ERR_STALE = 70;
+constexpr uint32_t NFS3_OK = 0, NFS3ERR_PERM = 1, NFS3ERR_NOENT = 2, NFS3ERR_EXIST = 17,
+                   NFS3ERR_NOTDIR = 20, NFS3ERR_ISDIR = 21, NFS3ERR_INVAL = 22, NFS3ERR_FBIG = 27,
+                   NFS3ERR_ROFS = 30, NFS3ERR_NOTEMPTY = 66, NFS3ERR_STALE = 70,
+                   NFS3ERR_BADTYPE = 10007;
 
 //  access3 bits — what this synthetic (read-mostly) target grants.
 constexpr uint32_t ACCESS3_READ = 0x0001, ACCESS3_LOOKUP = 0x0002, ACCESS3_EXECUTE = 0x0020;
@@ -253,6 +275,63 @@ void encodePostOp(Writer& w, INode* n) {
     } else {
         w.u32(0);
     }
+}
+
+//  prfs Error → nfsstat3.
+uint32_t toNfsStat(Error e) {
+    switch (e) {
+    case Error::OK:
+        return NFS3_OK;
+    case Error::NOENT:
+        return NFS3ERR_NOENT;
+    case Error::EXIST:
+        return NFS3ERR_EXIST;
+    case Error::NOTDIR:
+        return NFS3ERR_NOTDIR;
+    case Error::ISDIR:
+        return NFS3ERR_ISDIR;
+    case Error::NOTEMPTY:
+        return NFS3ERR_NOTEMPTY;
+    case Error::PERM:
+        return NFS3ERR_PERM;
+    case Error::INVAL:
+        return NFS3ERR_INVAL;
+    }
+    return NFS3ERR_INVAL;
+}
+
+//  A write fh must name the live tree; snapshot views are read-only.
+bool live(uint64_t snap) { return snap == LATEST; }
+
+//  pre_op_attr snapshot — the wcc "before" state, captured before a mutation so
+//  the client can validate its cache. Absent when there is no node.
+struct PreAttr {
+    bool have = false;
+    uint64_t size = 0, mtime = 0, ctime = 0;
+};
+
+PreAttr preOf(INode* n) {
+    if (!n) {
+        return {};
+    }
+    return {true, n->size(), n->mtime(), n->ctime()};
+}
+
+void encodePre(Writer& w, PreAttr const& p) {
+    if (p.have) {
+        w.u32(1);
+        w.u64(p.size);
+        w.time(p.mtime);
+        w.time(p.ctime);
+    } else {
+        w.u32(0);
+    }
+}
+
+//  wcc_data — the before/after pair a mutating op reports for a node.
+void encodeWcc(Writer& w, PreAttr const& before, INode* after) {
+    encodePre(w, before);
+    encodePostOp(w, after);
 }
 
 size_t pad4(size_t n) { return (n + 3) & ~size_t(3); }
@@ -429,6 +508,8 @@ private:
             return SUCCESS; // empty result
         case NFSPROC3_GETATTR:
             return nfsGetattr(r, w);
+        case NFSPROC3_SETATTR:
+            return nfsSetattr(r, w);
         case NFSPROC3_READLINK:
             return nfsReadlink(r, w);
         case NFSPROC3_LOOKUP:
@@ -437,6 +518,26 @@ private:
             return nfsAccess(r, w);
         case NFSPROC3_READ:
             return nfsRead(r, w);
+        case NFSPROC3_WRITE:
+            return nfsWrite(r, w);
+        case NFSPROC3_CREATE:
+            return nfsCreate(r, w);
+        case NFSPROC3_MKDIR:
+            return nfsMkdir(r, w);
+        case NFSPROC3_SYMLINK:
+            return nfsSymlink(r, w);
+        case NFSPROC3_MKNOD:
+            return nfsMknod(r, w);
+        case NFSPROC3_REMOVE:
+            return nfsRemove(r, w);
+        case NFSPROC3_RMDIR:
+            return nfsRmdir(r, w);
+        case NFSPROC3_RENAME:
+            return nfsRename(r, w);
+        case NFSPROC3_LINK:
+            return nfsLink(r, w);
+        case NFSPROC3_COMMIT:
+            return nfsCommit(r, w);
         case NFSPROC3_READDIR:
             return nfsReaddir(r, w);
         case NFSPROC3_READDIRPLUS:
@@ -758,6 +859,421 @@ private:
         w.u32(1);                 // chown_restricted
         w.u32(0);                 // case_insensitive
         w.u32(1);                 // case_preserving
+        return SUCCESS;
+    }
+
+    //  Read an sattr3 and apply the set fields to `n` (nullptr just consumes it).
+    void applySattr(Reader& r, Node n) {
+        if (r.u32()) { // set_mode3
+            uint32_t m = r.u32();
+            if (n) {
+                n->mode(m);
+            }
+        }
+        if (r.u32()) { // set_uid3
+            uint32_t u = r.u32();
+            if (n) {
+                n->uid(u);
+            }
+        }
+        if (r.u32()) { // set_gid3
+            uint32_t g = r.u32();
+            if (n) {
+                n->gid(g);
+            }
+        }
+        if (r.u32()) { // set_size3
+            uint64_t s = r.u64();
+            if (n) {
+                n->size(s);
+            }
+        }
+        uint32_t sa = r.u32(); // set_atime
+        if (sa == SET_TO_SERVER_TIME) {
+            if (n) {
+                n->atime(m_host.fs().now());
+            }
+        } else if (sa == SET_TO_CLIENT_TIME) {
+            uint32_t sec = r.u32();
+            r.u32(); // nsec
+            if (n) {
+                n->atime(sec);
+            }
+        }
+        uint32_t sm = r.u32(); // set_mtime
+        if (sm == SET_TO_SERVER_TIME) {
+            if (n) {
+                n->mtime(m_host.fs().now());
+            }
+        } else if (sm == SET_TO_CLIENT_TIME) {
+            uint32_t sec = r.u32();
+            r.u32(); // nsec
+            if (n) {
+                n->mtime(sec);
+            }
+        }
+    }
+
+    //  CREATE/MKDIR/SYMLINK/MKNOD share this tail: post_op_fh3 + post_op_attr for
+    //  the new object, then the parent directory's wcc_data.
+    void encodeNewObject(Writer& w, Node child, PreAttr dirPre, INode* dir) {
+        w.u32(1); // handle-follows
+        w.fh(child->id(), LATEST);
+        encodePostOp(w, child.get()); // obj_attributes
+        encodeWcc(w, dirPre, dir);    // dir_wcc
+    }
+
+    uint32_t nfsSetattr(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        Node n = fs.nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            encodeWcc(w, {}, nullptr);
+            return SUCCESS;
+        }
+        if (!live(snap)) {
+            w.u32(NFS3ERR_ROFS);
+            encodeWcc(w, preOf(n.get()), n.get());
+            return SUCCESS;
+        }
+        PreAttr pre = preOf(n.get());
+        applySattr(r, n);
+        if (r.u32()) { // sattrguard3 — ignore the ctime check
+            r.u32();
+            r.u32();
+        }
+        n->ctime(fs.now());
+        w.u32(NFS3_OK);
+        encodeWcc(w, pre, n.get());
+        return SUCCESS;
+    }
+
+    uint32_t nfsWrite(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        uint64_t off = r.u64();
+        r.u32();                    // count (data length is authoritative)
+        r.u32();                    // stable_how
+        std::string data = r.str(); // data<>
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node n = fs.nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            encodeWcc(w, {}, nullptr);
+            return SUCCESS;
+        }
+        if (n->type() != Type::REG) {
+            w.u32(NFS3ERR_INVAL);
+            encodeWcc(w, preOf(n.get()), n.get());
+            return SUCCESS;
+        }
+        if (!live(snap)) {
+            w.u32(NFS3ERR_ROFS);
+            encodeWcc(w, preOf(n.get()), n.get());
+            return SUCCESS;
+        }
+        if (off + data.size() > MAX_WRITE_FILE) {
+            w.u32(NFS3ERR_FBIG);
+            encodeWcc(w, preOf(n.get()), n.get());
+            return SUCCESS;
+        }
+        PreAttr pre = preOf(n.get());
+        //  Splice into the node's literal content (whole-file model; procedural
+        //  content is a read-time concern).
+        std::string c = n->content();
+        if (off + data.size() > c.size()) {
+            c.resize(off + data.size(), '\0');
+        }
+        std::copy(data.begin(), data.end(), c.begin() + off);
+        fs.setContent(n, c);
+        if (off + data.size() > n->size()) {
+            n->size(off + data.size());
+        }
+        n->mtime(fs.now());
+        w.u32(NFS3_OK);
+        encodeWcc(w, pre, n.get());
+        w.u32(uint32_t(data.size())); // count written
+        w.u32(WRITE_FILE_SYNC);       // committed
+        w.u32(0);                     // writeverf[8]
+        w.u32(0);
+        return SUCCESS;
+    }
+
+    //  Shared preamble for the verbs that take a diropargs3 (CREATE/MKDIR/
+    //  SYMLINK/MKNOD/REMOVE/RMDIR): read (dir fh, name), resolve and validate the
+    //  parent directory. On error it writes the failing dir_wcc and returns the
+    //  nfsstat3; on success it returns NFS3_OK with `dir`/`pre`/`name` set.
+    uint32_t diropParent(Reader& r, Writer& w, Node& dir, PreAttr& pre, std::string& name) {
+        IPrfs& fs = m_host.fs();
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        name = r.str();
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        dir = fs.nodeById(id, snap);
+        if (!dir) {
+            w.u32(NFS3ERR_STALE);
+            encodeWcc(w, {}, nullptr);
+            return NFS3ERR_STALE;
+        }
+        if (dir->type() != Type::DIR) {
+            w.u32(NFS3ERR_NOTDIR);
+            encodeWcc(w, preOf(dir.get()), dir.get());
+            return NFS3ERR_NOTDIR;
+        }
+        if (!live(snap)) {
+            w.u32(NFS3ERR_ROFS);
+            encodeWcc(w, preOf(dir.get()), dir.get());
+            return NFS3ERR_ROFS;
+        }
+        pre = preOf(dir.get());
+        return NFS3_OK;
+    }
+
+    //  Finish a create verb: link the new child, then encode the result.
+    uint32_t finishCreate(Writer& w, Node dir, PreAttr pre, std::string const& name, Node child) {
+        Error e = m_host.fs().link(dir, name, child);
+        if (e != Error::OK) {
+            w.u32(toNfsStat(e));
+            encodeWcc(w, pre, dir.get());
+            return SUCCESS;
+        }
+        w.u32(NFS3_OK);
+        encodeNewObject(w, child, pre, dir.get());
+        return SUCCESS;
+    }
+
+    uint32_t nfsCreate(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        Node dir;
+        PreAttr pre;
+        std::string name;
+        if (diropParent(r, w, dir, pre, name) != NFS3_OK) {
+            return SUCCESS;
+        }
+        uint32_t mode = r.u32(); // createmode3
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node existing = fs.lookup(dir, name);
+        if (existing) {
+            if (mode == CREATE_GUARDED) {
+                w.u32(NFS3ERR_EXIST);
+                encodeWcc(w, pre, dir.get());
+                return SUCCESS;
+            }
+            if (mode == CREATE_EXCLUSIVE) {
+                r.skip(8); // createverf3
+            } else {
+                applySattr(r, existing);
+            }
+            w.u32(NFS3_OK);
+            encodeNewObject(w, existing, pre, dir.get());
+            return SUCCESS;
+        }
+        Node child = fs.mkfile("");
+        if (mode == CREATE_EXCLUSIVE) {
+            r.skip(8); // createverf3
+        } else {
+            applySattr(r, child);
+        }
+        return finishCreate(w, dir, pre, name, child);
+    }
+
+    uint32_t nfsMkdir(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        Node dir;
+        PreAttr pre;
+        std::string name;
+        if (diropParent(r, w, dir, pre, name) != NFS3_OK) {
+            return SUCCESS;
+        }
+        Node child = fs.mkdir();
+        applySattr(r, child); // sattr3
+        return finishCreate(w, dir, pre, name, child);
+    }
+
+    uint32_t nfsSymlink(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        Node dir;
+        PreAttr pre;
+        std::string name;
+        if (diropParent(r, w, dir, pre, name) != NFS3_OK) {
+            return SUCCESS;
+        }
+        Node child = fs.symlink("");
+        applySattr(r, child);         // symlink_attributes (sattr3)
+        std::string target = r.str(); // nfspath3 symlink_data
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        fs.setTarget(child, target);
+        return finishCreate(w, dir, pre, name, child);
+    }
+
+    uint32_t nfsMknod(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        Node dir;
+        PreAttr pre;
+        std::string name;
+        if (diropParent(r, w, dir, pre, name) != NFS3_OK) {
+            return SUCCESS;
+        }
+        uint32_t type = r.u32(); // ftype3
+        Node child;
+        if (type == NF3BLK || type == NF3CHR) {
+            child = fs.mknod(type == NF3BLK ? Type::BLK : Type::CHR, 0, 0);
+            applySattr(r, child); // dev_attributes
+            uint32_t maj = r.u32();
+            uint32_t min = r.u32(); // specdata3
+            fs.setRdev(child, maj, min);
+        } else if (type == NF3FIFO) {
+            child = fs.mkfifo();
+            applySattr(r, child);
+        } else if (type == NF3SOCK) {
+            child = fs.mksock();
+            applySattr(r, child);
+        } else {
+            w.u32(NFS3ERR_BADTYPE);
+            encodeWcc(w, pre, dir.get());
+            return SUCCESS;
+        }
+        return finishCreate(w, dir, pre, name, child);
+    }
+
+    uint32_t nfsRemove(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        Node dir;
+        PreAttr pre;
+        std::string name;
+        if (diropParent(r, w, dir, pre, name) != NFS3_OK) {
+            return SUCCESS;
+        }
+        Error e = fs.unlink(dir, name);
+        w.u32(toNfsStat(e));
+        encodeWcc(w, pre, dir.get());
+        return SUCCESS;
+    }
+
+    uint32_t nfsRmdir(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        Node dir;
+        PreAttr pre;
+        std::string name;
+        if (diropParent(r, w, dir, pre, name) != NFS3_OK) {
+            return SUCCESS;
+        }
+        Node child = fs.lookup(dir, name);
+        uint32_t st = NFS3_OK;
+        if (!child) {
+            st = NFS3ERR_NOENT;
+        } else if (child->type() != Type::DIR) {
+            st = NFS3ERR_NOTDIR;
+        } else if (!fs.readdir(child).empty()) {
+            st = NFS3ERR_NOTEMPTY;
+        } else {
+            st = toNfsStat(fs.unlink(dir, name));
+        }
+        w.u32(st);
+        encodeWcc(w, pre, dir.get());
+        return SUCCESS;
+    }
+
+    uint32_t nfsRename(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t fid, fsnap;
+        if (!r.fh(fid, fsnap)) {
+            return GARBAGE_ARGS;
+        }
+        std::string fromName = r.str();
+        uint64_t tid, tsnap;
+        if (!r.fh(tid, tsnap)) {
+            return GARBAGE_ARGS;
+        }
+        std::string toName = r.str();
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node fromDir = fs.nodeById(fid, fsnap);
+        Node toDir = fs.nodeById(tid, tsnap);
+        if (!fromDir || !toDir) {
+            w.u32(NFS3ERR_STALE);
+            encodeWcc(w, preOf(fromDir ? fromDir.get() : nullptr), fromDir.get());
+            encodeWcc(w, preOf(toDir ? toDir.get() : nullptr), toDir.get());
+            return SUCCESS;
+        }
+        PreAttr fpre = preOf(fromDir.get());
+        PreAttr tpre = preOf(toDir.get());
+        uint32_t st = NFS3ERR_ROFS;
+        if (live(fsnap) && live(tsnap)) {
+            st = toNfsStat(fs.move(fromDir, fromName, toDir, toName));
+        }
+        w.u32(st);
+        encodeWcc(w, fpre, fromDir.get()); // fromdir_wcc
+        encodeWcc(w, tpre, toDir.get());   // todir_wcc
+        return SUCCESS;
+    }
+
+    uint32_t nfsLink(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t fid, fsnap;
+        if (!r.fh(fid, fsnap)) {
+            return GARBAGE_ARGS;
+        }
+        uint64_t did, dsnap;
+        if (!r.fh(did, dsnap)) {
+            return GARBAGE_ARGS;
+        }
+        std::string name = r.str();
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node file = fs.nodeById(fid, fsnap);
+        Node dir = fs.nodeById(did, dsnap);
+        if (!file || !dir) {
+            w.u32(NFS3ERR_STALE);
+            encodePostOp(w, file.get());
+            encodeWcc(w, preOf(dir ? dir.get() : nullptr), dir.get());
+            return SUCCESS;
+        }
+        PreAttr pre = preOf(dir.get());
+        uint32_t st = live(dsnap) ? toNfsStat(fs.link(dir, name, file)) : NFS3ERR_ROFS;
+        w.u32(st);
+        encodePostOp(w, file.get());  // file_attributes
+        encodeWcc(w, pre, dir.get()); // linkdir_wcc
+        return SUCCESS;
+    }
+
+    uint32_t nfsCommit(Reader& r, Writer& w) {
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        r.u64(); // offset
+        r.u32(); // count
+        Node n = m_host.fs().nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            encodeWcc(w, {}, nullptr);
+            return SUCCESS;
+        }
+        //  Writes are applied synchronously, so COMMIT is a no-op success.
+        w.u32(NFS3_OK);
+        encodeWcc(w, preOf(n.get()), n.get());
+        w.u32(0); // writeverf[8]
+        w.u32(0);
         return SUCCESS;
     }
 
