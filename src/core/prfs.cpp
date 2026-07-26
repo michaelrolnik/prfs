@@ -41,6 +41,20 @@ static uint64_t rdbe(char const* p) {
     return x;
 }
 
+//  Default permission bits a freshly created node gets (over NFS the client's
+//  sattr overrides this; direct API callers rely on it). Dirs/symlinks need the
+//  x/traverse bits or the tree is unusable.
+static uint32_t defaultMode(Type t) {
+    switch (t) {
+    case Type::DIR:
+        return 0755;
+    case Type::LNK:
+        return 0777;
+    default:
+        return 0644;
+    }
+}
+
 // ---- synthesized .snapshot dir (design §3.2) -----------------------------
 // A node id with the top bit set is the virtual snapshot-list directory of the
 // node in the low 63 bits — a real, filehandle-round-trippable id in a reserved
@@ -634,6 +648,7 @@ private:
 
         NodeRec r;
         r.type = uint32_t(type);
+        r.mode = defaultMode(type);
         r.spec = spec;
         r.blob = std::move(blob);
         r.dnLinkVer = m_cur;

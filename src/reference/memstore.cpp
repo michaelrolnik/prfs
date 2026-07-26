@@ -46,6 +46,19 @@ struct Attr {
     uint64_t size = 0, atime = 0, mtime = 0, ctime = 0, spec = 0;
 };
 
+//  Default permission bits a freshly created node gets (must match the PrfsStore
+//  engine — see prfs.cpp). Dirs/symlinks need the x/traverse bits.
+static uint32_t defaultMode(Type t) {
+    switch (t) {
+    case Type::DIR:
+        return 0755;
+    case Type::LNK:
+        return 0777;
+    default:
+        return 0644;
+    }
+}
+
 struct NodeVer {
     SnapId snap;
     Attr a;
@@ -476,6 +489,7 @@ private:
         uint64_t id = m_next++;
         Attr a;
         a.type = t;
+        a.mode = defaultMode(t);
         a.spec = spec;
         a.atime = a.mtime = a.ctime = now();
         m_nodes[id].push_back({m_cur, a, std::move(blob)});
