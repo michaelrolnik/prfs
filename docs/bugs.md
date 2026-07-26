@@ -12,7 +12,7 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 | B3  | 🟠  | ⬜     | Snapshot metadata lost                                 | T3   |
 | B4  | 🟠  | ⬜     | `readdir` pagination on a live directory               | T4   |
 | B5  | 🟡  | ⬜     | Synthesized `.snapshot` has no concrete identity       | T5   |
-| B6  | 🟡  | ⬜     | Timestamp source unspecified                           | T6   |
+| B6  | 🟡  | ✅     | Timestamp source unspecified                           | T6   |
 | B7  | 🟡  | ⬜     | `size` vs content block-structure authority            | T7   |
 | B8  | 🟡  | ⬜     | `linkMode` in schema ahead of decision                 | T8   |
 | B9  | 🟡  | ✅     | `stats().links` undercounted orphan-dir entries        | S9   |
@@ -38,11 +38,6 @@ and add/remove-mid-scan behaviour are undefined. (Sealed snapshot dirs are immut
 The virtual snapshot-list directory must be GETATTR-able and round-trip an NFS filehandle: it
 needs a synthetic node id, synthetic attrs (mode/times/nlink), and a defined `readdir`. Currently
 hand-waved. → T5.
-
-### B6 — timestamp source unspecified 🟡 ⬜
-
-For reproducibility and mtime-based tests, times must be deterministic (a logical/script-driven
-clock), not wall-clock — otherwise the "reproducible" goal is untrue. → T6.
 
 ### B7 — `size` vs content block-structure authority 🟡 ⬜
 
@@ -72,6 +67,15 @@ and by the differential/invariant harnesses. Store keeps the true `nlink = #inco
 Carved out to the **NFS front-end** (not `libprfs`, tracked under todo L2): `..` resolution =
 **via-parent** (filehandle-encoded, depth-bounded ancestor chain), and directory-`nlink`
 reporting mode — POSIX-compat (`2 + #subdirs`, default) vs faithful (`#parents`).
+
+### B6 — timestamp source unspecified 🟡 ✅
+
+For reproducibility and mtime-based tests, times must be deterministic — a logical/script-driven
+clock, not wall-clock. Fixed (design §3.5): `IPrfs::now()` reads a logical clock (no advance),
+`setTime(t)` is the only thing that moves it (script owns the timeline; persisted in `meta` so a
+reopen resumes it), new nodes stamp `atime=mtime=ctime=now()`, and all other time changes stay
+explicit. Both engines; verified by `tests/core/clock.cpp` and clock-persistence in the crash
+suite. Nothing in the store ever reads wall-clock time.
 
 ### B2 — `diff` / `changes` semantics 🟡 ✅
 

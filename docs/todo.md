@@ -14,7 +14,7 @@ Status: ✅ done · ⬜ open.
 | T3  | ⬜     | `snaps: snapId → {ctime, label}` table (fixes B3)                           |
 | T4  | ⬜     | `readdir` cookies + live-dir mutate-mid-scan (fixes B4)                     |
 | T5  | ⬜     | Synthesized `.snapshot` node: identity, attrs, `readdir`, filehandle (B5)   |
-| T6  | ⬜     | Deterministic logical / script-driven clock (fixes B6)                     |
+| T6  | ✅     | Deterministic logical / script-driven clock (fixes B6)                     |
 | T7  | ⬜     | `size` vs content-block-structure authority (fixes B7)                      |
 | T8  | ⬜     | Mark `linkMode` reserved / defer (fixes B8)                                 |
 | T9  | ⬜     | Define `Error`, `Stats`, `Options` when fleshing design §7                  |
@@ -49,7 +49,7 @@ Status: ✅ done · ⬜ open.
 - **T3** ⬜ — add `snaps: snapId → {ctime, label}` table; `snapshot()` writes it (fixes B3).
 - **T4** ⬜ — define `readdir` cookies + live-dir mutate-mid-scan behaviour (fixes B4).
 - **T5** ⬜ — define the synthesized `.snapshot` node: identity, attrs, `readdir`, filehandle (fixes B5).
-- **T6** ⬜ — define timestamp policy: deterministic logical / script-driven clock (fixes B6).
+- **T6** ✅ — timestamp policy: a deterministic, script-driven **logical clock** (design §3.5). `IPrfs::now()`/`setTime()` on the interface; new nodes stamp `atime=mtime=ctime=now()`, other time changes explicit; never wall-clock; persisted in `meta` (survives reopen). Both engines; Lua `store:now()`/`setTime()`; tests `tests/core/clock.cpp` + crash-suite persistence. Fixes B6.
 - **T7** ⬜ — state `size` vs content-block-structure relationship (fixes B7).
 - **T8** ⬜ — mark `linkMode` reserved, or defer until the hybrid decision (fixes B8).
 - **T9** ⬜ — define `Error`, `Stats`, `Options` when fleshing design §7.

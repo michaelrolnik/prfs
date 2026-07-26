@@ -90,4 +90,11 @@ assert(fss.abytes == fss.fbytes)
 local fsi = prfs.fsInfo()
 assert(fsi.rtpref > 0 and fsi.maxfilesize > 0)
 
+-- logical clock -------------------------------------------------------------
+assert(s:now() == 0)
+s:setTime(1700000000)
+assert(s:now() == 1700000000)
+local timed = s:mkfile("t")
+assert(timed:mtime() == 1700000000, "new node stamps the logical clock")
+
 print("prfs lua smoke: OK")

@@ -150,6 +150,24 @@ snapshot id.
 Taking a snapshot itself touches only a couple of keys. Link sets are copied lazily, on
 modification (§3.3) — never at snapshot time.
 
+### 3.5 Timestamps — a logical, script-driven clock
+
+`atime`/`mtime`/`ctime` come from a **logical clock**, never wall-clock. This is what makes
+scenarios reproducible and lets tests drive **mtime-window incrementals** deterministically.
+
+- `now()` reads the clock; it **does not advance** — reads are not ticks.
+- `setTime(t)` is the *only* thing that moves the clock. The script owns the timeline (it may
+  even move backward — the store does not enforce monotonicity). Persisted with the store
+  (in `meta`), so a reopened store resumes its timeline.
+- A newly created node stamps `atime = mtime = ctime = now()`. Nodes born at the same logical
+  instant share a stamp — creation order does not implicitly advance time.
+- Every other time change is **explicit**: attribute setters (`node.mtime(v)`, …) touch only
+  the field named, and `link`/`unlink` never auto-touch times (a relink/rename is invisible
+  to mtime-based backups by design — that is what `diffPaths` is for, §6.1).
+
+Typical scenario: `setTime(monday); …create files…; snapshot(); setTime(tuesday); …touch some
+files at now()…; snapshot()` — then `diff` over that mtime window is exactly reproducible.
+
 ### 3.1 Link-set versions (per node)
 
 A node's link sets are versioned as a whole, and the version lives in the node's

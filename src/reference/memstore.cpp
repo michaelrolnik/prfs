@@ -104,6 +104,12 @@ public:
         m_changes[m_cur].insert(m_root);
     }
 
+    //  Logical clock (design §3): deterministic and script-driven, never
+    //  wall-clock. now() reads it; setTime() is the only thing that advances it.
+    uint64_t now() const override { return m_clock; }
+
+    void setTime(uint64_t t) override { m_clock = t; }
+
     Node rwRoot() override { return handle(m_root, LATEST); }
 
     Node snapshotRoot(SnapId n) override { return handle(m_root, n); }
@@ -345,8 +351,6 @@ public:
 private:
     // ---- helpers ----
     SnapId resolve(SnapId g) const { return g == LATEST ? m_cur : g; }
-
-    uint64_t now() { return ++m_clock; }
 
     Node handle(uint64_t id, SnapId snap) { return std::make_shared<MemNode>(this, id, snap); }
 

@@ -110,6 +110,11 @@ public:
     virtual std::vector<std::pair<std::string, Node>> readdir(Node dir) = 0;
     virtual std::vector<Node> parents(Node node) = 0;
 
+    //  logical clock (design §3) — deterministic, script-driven, never wall-clock.
+    //  New nodes stamp atime/mtime/ctime = now(); other time changes are explicit.
+    virtual uint64_t now() const = 0;     // read the logical time (does not advance)
+    virtual void setTime(uint64_t t) = 0; // set the logical time (the only advance)
+
     //  versioning
     virtual SnapId snapshot() = 0;
     virtual std::vector<NodeDiff> diffNodes(SnapId a, SnapId b) = 0;

@@ -9,6 +9,7 @@ test_inc = include_directories('.')
 #   Mirrors src/: core/* exercises PrfsStore (all engines); storage/lmdb/* is
 #   engine-specific. name → source, followed by an optional per-test timeout.
 tests = [
+    ['clock', 'core/clock.cpp', 60],
     ['contract', 'core/contract.cpp', 60],
     ['dag', 'core/dag.cpp', 60],
     ['differential', 'core/differential.cpp', 120],

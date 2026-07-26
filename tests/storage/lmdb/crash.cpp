@@ -55,6 +55,7 @@ TEST(CrashSafety, CommittedStateSurvivesReopen) {
     std::string stats;
     std::vector<SnapId> snaps;
     std::vector<std::string> snapViews;
+    uint64_t clock = 0;
 
     //  Build a non-trivial history, then drop the store (== crash) without any
     //  explicit shutdown beyond object destruction.
@@ -63,6 +64,8 @@ TEST(CrashSafety, CommittedStateSurvivesReopen) {
         for (int i = 0; i < 700; ++i) {
             m.step(i);
         }
+        m.a().setTime(1234567); // the logical clock must survive too
+        clock = m.a().now();
         view = canon(m.a(), m.a().rwRoot());
         stats = statsStr(m.a());
         snaps = m.a().snapshots();
@@ -76,6 +79,7 @@ TEST(CrashSafety, CommittedStateSurvivesReopen) {
         auto fs = open(path, false);
         EXPECT_EQ(view, canon(*fs, fs->rwRoot())) << "live view lost across reopen";
         EXPECT_EQ(stats, statsStr(*fs)) << "counters lost across reopen";
+        EXPECT_EQ(clock, fs->now()) << "logical clock lost across reopen";
         ASSERT_EQ(snaps, fs->snapshots());
         for (size_t i = 0; i < snaps.size(); ++i) {
             SCOPED_TRACE("snapshot view " + std::to_string(snaps[i]));

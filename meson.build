@@ -142,6 +142,7 @@ fmt_files = files(
     'src/lua/bindings.cpp',
     'src/lua/harness.cpp',
     'tests/support.hpp',
+    'tests/core/clock.cpp',
     'tests/core/contract.cpp',
     'tests/core/dag.cpp',
     'tests/core/differential.cpp',

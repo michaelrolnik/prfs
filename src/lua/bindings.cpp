@@ -14,7 +14,8 @@
 //    store:lookup(dir,name) / :link(dir,name,child) -> Error / :unlink(dir,name) / :move(...)
 //    store:setContent / :setTarget / :setRdev
 //    store:readdir(dir) -> { {name=,node=}, ... }   store:parents(node) -> { node, ... }
-//    store:snapshot() -> id   :diffNodes(a,b)   :diffPaths(a,b)   :stats()
+//    store:now() / :setTime(t)   -- logical clock (deterministic, script-driven)
+//    store:snapshot() -> id   :diffNodes(a,b)   :diffPaths(a,b)   :stats()   :fsStat()
 //
 //    node:id() :type() :nlink() :size()/:setSize(v) :mode()/:setMode(v) (uid/gid/atime/mtime/ctime)
 //    node:target() :content() :rdev() -> (major, minor)
@@ -195,6 +196,8 @@ void registerLua(sol::state_view lua) {
         "setRdev", &IPrfs::setRdev,           //
         "readdir", &readdirLua,               //
         "parents", &parentsLua,               //
+        "now", &IPrfs::now,                   //
+        "setTime", &IPrfs::setTime,           //
         "snapshot", &IPrfs::snapshot,         //
         "diffNodes", &diffNodesLua,           //
         "diffPaths", &diffPathsLua,           //

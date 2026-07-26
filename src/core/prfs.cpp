@@ -158,16 +158,30 @@ public:
             r.nlink = 1;
             r.dnLinkVer = 1;
             r.upLinkVer = 1;
-            r.atime = r.mtime = r.ctime = ++m_clock;
+            r.atime = r.mtime = r.ctime = m_clock;
 
             storeNode(w.get(), m_root, m_cur, r);
             putMeta(w.get(), "root", m_root);
             putMeta(w.get(), "next_node", m_next);
             putMeta(w.get(), "cur_snap", m_cur);
+            putMeta(w.get(), "clock", m_clock);
         } else {
             getMeta(w.get(), "next_node", m_next);
             getMeta(w.get(), "cur_snap", m_cur);
+            getMeta(w.get(), "clock", m_clock);
         }
+        w->commit();
+    }
+
+    //  Logical clock (design §3): deterministic and script-driven, never
+    //  wall-clock. now() reads it; setTime() is the only thing that advances it.
+    uint64_t now() const override { return m_clock; }
+
+    void setTime(uint64_t t) override {
+        m_clock = t;
+
+        auto w = m_kv->begin(true);
+        putMeta(w.get(), "clock", m_clock);
         w->commit();
     }
 
@@ -473,7 +487,7 @@ private:
         r.blob = std::move(blob);
         r.dnLinkVer = m_cur;
         r.upLinkVer = m_cur;
-        r.atime = r.mtime = r.ctime = ++m_clock;
+        r.atime = r.mtime = r.ctime = m_clock;
 
         storeNode(w.get(), id, m_cur, r);
         w->commit();
