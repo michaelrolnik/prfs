@@ -1,0 +1,47 @@
+---
+Language:        Cpp
+Standard:        c++20
+ColumnLimit:     100
+IndentWidth:     4
+TabWidth:        4
+UseTab:          Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+FixNamespaceComments: true
+SeparateDefinitionBlocks: Always
+
+PointerAlignment:   Left
+ReferenceAlignment: Left
+SpaceBeforeParens:  ControlStatements
+SortIncludes:       false
+
+AllowShortFunctionsOnASingleLine:    All
+AllowShortIfStatementsOnASingleLine: false
+AllowShortBlocksOnASingleLine:       Empty
+AllowShortLoopsOnASingleLine:        false
+
+# constructor init lists and base lists: leading colon / comma, one per line
+BreakConstructorInitializers: BeforeComma
+BreakInheritanceList:         BeforeComma
+PackConstructorInitializers:  Never
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth:           4
+
+# attached braces everywhere; else/catch on the same line as the closing brace
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterCaseLabel:        false
+  AfterClass:            false
+  AfterControlStatement: Never
+  AfterEnum:             false
+  AfterFunction:         false
+  AfterNamespace:        false
+  AfterStruct:           false
+  AfterUnion:            false
+  AfterExternBlock:      false
+  BeforeCatch:           false
+  BeforeElse:            false
+  IndentBraces:          false
+  SplitEmptyFunction:    false
+  SplitEmptyRecord:      false
+...

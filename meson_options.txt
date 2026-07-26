@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Michael Rolnik <mrolnik@gmail.com>
+
+option(
+    'storage',
+    type        : 'combo',
+    choices     : ['lmdb', 'memory'],
+    value       : 'lmdb',
+    description : 'metadata storage backend (openPrfs). More engines add a choice here.',
+)
