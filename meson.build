@@ -169,12 +169,13 @@ if get_option('lua')
         dependencies        : [prfs_lua_dep],
     )
     test('lua-scenario', prfs_test, args : files('tests/lua/smoke.lua'), timeout : 60)
-    #   The bigtree example, built tiny (depth 2, branching 2, 1 MiB total).
+    #   The bigtree example, built tiny: depth 2, <=2 dirs & <=2 files per level,
+    #   1 MiB total, fixed seed 1.
     test(
         'example-bigtree',
         prfs_test,
         args    : [files('examples/bigtree.lua'), meson.current_build_dir() / 'bigtree-store',
-                   '2', '2', '1048576'],
+                   '2', '2', '2', '1048576', '1'],
         timeout : 60,
     )
 endif
