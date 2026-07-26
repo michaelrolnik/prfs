@@ -17,8 +17,8 @@
 //   - unlink is a generic edge removal (no empty-dir check); rmdir semantics
 //     belong to the front-end.
 //   - content/targets are stored inline (no interning); dedup stats are phase-2.
-//   - `.snapshot` path synthesis is a front-end concern, not modelled here;
-//     snapshot views are reached via snapshotRoot(N).
+//   - `.snapshot` is synthesized here too (design §3.2): lookup/readdir handle
+//     the reserved name and the reserved synthetic id-space (top-bit ids).
 //
 #include "prfs/memstore.hpp"
 
@@ -28,6 +28,14 @@
 
 namespace prfs {
 namespace {
+
+// The synthesized .snapshot dir of a node uses that node's id with the top bit
+// set — a reserved, filehandle-round-trippable id (design §3.2).
+constexpr uint64_t SNAP_BIT = uint64_t(1) << 63;
+
+bool isSnapDir(uint64_t id) { return (id & SNAP_BIT) != 0; }
+
+uint64_t snapBase(uint64_t id) { return id & ~SNAP_BIT; }
 
 struct Attr {
     Type type{};
@@ -137,8 +145,22 @@ public:
     }
 
     Node lookup(Node dir, std::string const& name) override {
-        uint64_t child;
+        //  Inside a synthesized .snapshot dir: name is a snapId N → base at N.
+        if (isSnapDir(dir->id())) {
+            uint64_t base = snapBase(dir->id());
+            SnapId n;
+            if (!parseSnap(name, n) || n < 1 || n >= m_cur || !effR(base, n)) {
+                return nullptr;
+            }
+            return handle(base, n);
+        }
 
+        //  The virtual .snapshot dir is synthesized only in a live dir view.
+        if (name == SNAPSHOT_NAME && dir->snap() == LATEST && dir->type() == Type::DIR) {
+            return handle(dir->id() | SNAP_BIT, LATEST);
+        }
+
+        uint64_t child;
         if (linkLiveAt({dir->id(), name}, dir->snap(), child)) {
             return handle(child, dir->snap());
         }
@@ -146,6 +168,9 @@ public:
     }
 
     Error link(Node dir, std::string const& name, Node child) override {
+        if (name == SNAPSHOT_NAME) {
+            return Error::INVAL; // reserved for the synthesized snapshot dir (§3.2)
+        }
         if (dir->type() != Type::DIR) {
             return Error::NOTDIR;
         }
@@ -231,8 +256,19 @@ public:
 
     std::vector<std::pair<std::string, Node>> readdir(Node dir) override {
         std::vector<std::pair<std::string, Node>> out;
-        auto ni = m_names.find(dir->id());
 
+        //  Listing a .snapshot dir: one entry "N" per snapshot the base existed at.
+        if (isSnapDir(dir->id())) {
+            uint64_t base = snapBase(dir->id());
+            for (SnapId n = 1; n < m_cur; ++n) {
+                if (effR(base, n)) {
+                    out.push_back({std::to_string(n), handle(base, n)});
+                }
+            }
+            return out;
+        }
+
+        auto ni = m_names.find(dir->id());
         if (ni == m_names.end()) {
             return out;
         }
@@ -393,6 +429,39 @@ private:
 
     NodeVer const* eff(uint64_t id, SnapId g) const { return effR(id, resolve(g)); }
 
+    //  Effective attributes by value — synthesizes the read-only .snapshot dir
+    //  (mirroring the base node's timestamps) for reserved top-bit ids.
+    Attr effAttr(uint64_t id, SnapId g) const {
+        if (isSnapDir(id)) {
+            Attr base = effAttr(snapBase(id), g);
+            Attr s;
+            s.type = Type::DIR;
+            s.mode = 0555;
+            s.nlink = 1;
+            s.atime = base.atime;
+            s.mtime = base.mtime;
+            s.ctime = base.ctime;
+            return s;
+        }
+        NodeVer const* v = eff(id, g);
+        return v ? v->a : Attr{};
+    }
+
+    static bool parseSnap(std::string const& s, SnapId& out) {
+        if (s.empty()) {
+            return false;
+        }
+        SnapId v = 0;
+        for (char c : s) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            v = v * 10 + uint64_t(c - '0');
+        }
+        out = v;
+        return true;
+    }
+
     // copy-on-write the node into m_cur and return the live version
     NodeVer& liveVer(uint64_t id) {
         auto& vs = m_nodes[id];
@@ -480,47 +549,23 @@ private:
 };
 
 // ---- MemNode accessors ----
-Type MemNode::type() const { return m_store->m_nodes.at(m_id).front().a.type; }
+Type MemNode::type() const { return m_store->effAttr(m_id, m_snap).type; }
 
-uint32_t MemNode::nlink() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.nlink : 0;
-}
+uint32_t MemNode::nlink() const { return m_store->effAttr(m_id, m_snap).nlink; }
 
-uint32_t MemNode::mode() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.mode : 0;
-}
+uint32_t MemNode::mode() const { return m_store->effAttr(m_id, m_snap).mode; }
 
-uint32_t MemNode::uid() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.uid : 0;
-}
+uint32_t MemNode::uid() const { return m_store->effAttr(m_id, m_snap).uid; }
 
-uint32_t MemNode::gid() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.gid : 0;
-}
+uint32_t MemNode::gid() const { return m_store->effAttr(m_id, m_snap).gid; }
 
-uint64_t MemNode::size() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.size : 0;
-}
+uint64_t MemNode::size() const { return m_store->effAttr(m_id, m_snap).size; }
 
-uint64_t MemNode::atime() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.atime : 0;
-}
+uint64_t MemNode::atime() const { return m_store->effAttr(m_id, m_snap).atime; }
 
-uint64_t MemNode::mtime() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.mtime : 0;
-}
+uint64_t MemNode::mtime() const { return m_store->effAttr(m_id, m_snap).mtime; }
 
-uint64_t MemNode::ctime() const {
-    auto v = m_store->eff(m_id, m_snap);
-    return v ? v->a.ctime : 0;
-}
+uint64_t MemNode::ctime() const { return m_store->effAttr(m_id, m_snap).ctime; }
 
 void MemNode::mode(uint32_t x) {
     m_store->liveVer(m_id).a.mode = x;

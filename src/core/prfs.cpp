@@ -42,6 +42,16 @@ uint64_t rdbe(char const* p) {
     return x;
 }
 
+// ---- synthesized .snapshot dir (design §3.2) -----------------------------
+// A node id with the top bit set is the virtual snapshot-list directory of the
+// node in the low 63 bits — a real, filehandle-round-trippable id in a reserved
+// id-space (real ids come from a small counter, so the bit is always free).
+constexpr uint64_t SNAP_BIT = uint64_t(1) << 63;
+
+bool isSnapDir(uint64_t id) { return (id & SNAP_BIT) != 0; }
+
+uint64_t snapBase(uint64_t id) { return id & ~SNAP_BIT; }
+
 struct NodeRec {
     uint32_t type = 0, mode = 0, uid = 0, gid = 0, nlink = 0;
     uint64_t size = 0, atime = 0, mtime = 0, ctime = 0, spec = 0, dnLinkVer = 0, upLinkVer = 0;
@@ -214,10 +224,27 @@ public:
 
     Node lookup(Node dir, std::string const& name) override {
         auto r = m_kv->begin(false);
-        NodeRec dr;
 
+        //  Inside a synthesized .snapshot dir: the name is a snapId N →
+        //  the base node viewed at snapshot N.
+        if (isSnapDir(dir->id())) {
+            uint64_t base = snapBase(dir->id());
+            SnapId n;
+            if (!parseSnap(name, n) || n < 1 || n >= m_cur || !existedAt(r.get(), base, n)) {
+                return nullptr;
+            }
+            return handle(base, n);
+        }
+
+        NodeRec dr;
         if (!loadNode(r.get(), dir->id(), rr(dir->snap()), dr)) {
             return nullptr;
+        }
+
+        //  The virtual .snapshot dir is synthesized only in a *live* directory
+        //  view — never inside an already-frozen one (no /.snapshot/5/.snapshot).
+        if (name == SNAPSHOT_NAME && dir->snap() == LATEST && dr.type == uint32_t(Type::DIR)) {
+            return handle(dir->id() | SNAP_BIT, LATEST);
         }
 
         std::string child;
@@ -295,14 +322,28 @@ public:
     std::vector<std::pair<std::string, Node>> readdir(Node dir) override {
         std::vector<std::pair<std::string, Node>> out;
         auto r = m_kv->begin(false);
-        NodeRec dr;
 
+        //  Listing a .snapshot dir: one entry "N" per snapshot the base existed
+        //  at, each resolving to the base viewed at N.
+        if (isSnapDir(dir->id())) {
+            uint64_t base = snapBase(dir->id());
+            for (SnapId n = 1; n < m_cur; ++n) {
+                if (existedAt(r.get(), base, n)) {
+                    out.push_back({std::to_string(n), handle(base, n)});
+                }
+            }
+            return out;
+        }
+
+        NodeRec dr;
         if (!loadNode(r.get(), dir->id(), rr(dir->snap()), dr)) {
             return out;
         }
         scanDownlinks(r.get(), dir->id(), dr.dnLinkVer, [&](std::string const& n, uint64_t c) {
             out.push_back({n, handle(c, dir->snap())});
         });
+        //  .snapshot is resolvable by name but hidden from readdir by default,
+        //  so a tree-walking archiver does not recurse into every snapshot.
         return out;
     }
 
@@ -647,6 +688,10 @@ private:
     }
 
     Error linkT(IKvTxn* t, uint64_t dir, std::string const& name, uint64_t child) {
+        if (name == SNAPSHOT_NAME) {
+            return Error::INVAL; // reserved for the synthesized snapshot dir (§3.2)
+        }
+
         NodeRec dr, cr;
         if (!loadNode(t, dir, m_cur, dr)) {
             return Error::NOENT;
@@ -720,10 +765,46 @@ private:
 
     // for PrfsNode
     NodeRec readNode(uint64_t id, SnapId snap) {
+        if (isSnapDir(id)) {
+            //  Synthetic GETATTR: a read-only directory mirroring the base
+            //  node's timestamps, so the handle is fully attributable.
+            NodeRec base = readNode(snapBase(id), snap);
+            NodeRec s;
+            s.type = uint32_t(Type::DIR);
+            s.mode = 0555;
+            s.nlink = 1;
+            s.atime = base.atime;
+            s.mtime = base.mtime;
+            s.ctime = base.ctime;
+            return s;
+        }
+
         auto r = m_kv->begin(false);
         NodeRec n;
         loadNode(r.get(), id, rr(snap), n);
         return n;
+    }
+
+    //  A snapshot N is listed under D/.snapshot iff it is sealed and D existed
+    //  at it (loadNode floors to the newest record ≤ N).
+    bool existedAt(IKvTxn* t, uint64_t id, SnapId n) const {
+        NodeRec tmp;
+        return loadNode(t, id, n, tmp);
+    }
+
+    static bool parseSnap(std::string const& s, SnapId& out) {
+        if (s.empty()) {
+            return false;
+        }
+        SnapId v = 0;
+        for (char c : s) {
+            if (c < '0' || c > '9') {
+                return false;
+            }
+            v = v * 10 + uint64_t(c - '0');
+        }
+        out = v;
+        return true;
     }
 
     void mutateNode(uint64_t id, std::function<void(NodeRec&)> fn) {

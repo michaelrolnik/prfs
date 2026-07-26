@@ -11,7 +11,7 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 | B2  | 🟡  | ✅     | `diff` / `changes` semantics undefined                 | T2   |
 | B3  | 🟠  | ✅     | Snapshot metadata lost                                 | T3   |
 | B4  | 🟠  | ⬜     | `readdir` pagination on a live directory               | T4   |
-| B5  | 🟡  | ⬜     | Synthesized `.snapshot` has no concrete identity       | T5   |
+| B5  | 🟡  | ✅     | Synthesized `.snapshot` has no concrete identity       | T5   |
 | B6  | 🟡  | ✅     | Timestamp source unspecified                           | T6   |
 | B7  | 🟡  | ⬜     | `size` vs content block-structure authority            | T7   |
 | B8  | 🟡  | ⬜     | `linkMode` in schema ahead of decision                 | T8   |
@@ -26,12 +26,6 @@ Severity: 🔴 critical · 🟠 high · 🟡 medium. Status: ✅ resolved · ⬜
 NFS `READDIR` is paginated with cookies; the live dir can change between calls. Cookie stability
 and add/remove-mid-scan behaviour are undefined. (Sealed snapshot dirs are immutable and fine.)
 → T4.
-
-### B5 — synthesized `.snapshot` has no concrete identity 🟡 ⬜
-
-The virtual snapshot-list directory must be GETATTR-able and round-trip an NFS filehandle: it
-needs a synthetic node id, synthetic attrs (mode/times/nlink), and a defined `readdir`. Currently
-hand-waved. → T5.
 
 ### B7 — `size` vs content block-structure authority 🟡 ⬜
 
@@ -78,6 +72,17 @@ had no anchor. Fixed (design §3.2): a `snaps: snapId → {ctime, label}` sub-st
 `snapshot(label)` (ctime = the logical clock at seal time, §3.5) and read via `snapInfo(id)`.
 Persisted (survives reopen); both engines; `tests/core/snapshot.cpp` + crash-suite persistence.
 Exposed to Lua as `store:snapshot([label])` / `store:snapInfo(id)`.
+
+### B5 — synthesized `.snapshot` has no concrete identity 🟡 ✅
+
+The virtual snapshot-list directory needed a synthetic node id, synthetic attrs, and a defined
+`readdir` to be GETATTR-able and round-trip an NFS filehandle. Fixed (design §3.2): `.snapshot`
+of node `D` has the concrete id `D.id | (1<<63)` (reserved top-bit id-space), reports as a
+read-only `0555` dir (`nlink 1`, times mirroring `D`), lists `"N"` per snapshot `D` existed at,
+and `lookup(snapDir,"N")` → `(D.id, N)`. Live-view-only (no nesting), DIR-only, hidden from
+`readdir` but resolvable; `link`/`move` reject the reserved name (`INVAL`). Both engines;
+`tests/core/snapdir.cpp` (9 cases × 2 engines). *Deferred to the NFS front-end (todo L2):* a
+config flag to also *list* `.snapshot` in `readdir`.
 
 ### B2 — `diff` / `changes` semantics 🟡 ✅
 

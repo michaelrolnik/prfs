@@ -208,8 +208,17 @@ Rules that make it behave (and not explode a tree walk):
    you specifically want to test snapshot-aware backup.
 
 The reserved `.snapshot` name is owned by the **store**, so Lua tests and the NFS front-end
-behave identically. Because it is synthesized, `snapshot()` writes **no** link — it is just
+behave identically. `link`/`move` reject the name (`INVAL`) so a real entry can never shadow
+the synthesized one. Because it is synthesized, `snapshot()` writes **no** link — it is just
 *seal + `cur_snap++`* plus one small metadata record (§6).
+
+**Identity (filehandle round-trip).** The `.snapshot` dir of node `D` has the concrete id
+`D.nodeID | (1<<63)` — a real id in a reserved top-bit id-space (node ids come from a small
+counter, so the bit is always free). It is fully `GETATTR`-able: a read-only (`0555`)
+directory, `nlink 1`, timestamps mirroring `D`. `lookup(D,".snapshot")` returns that handle;
+`readdir` of it lists `"N"` per snapshot `D` existed at; `lookup(snapDir,"N")` returns
+`(D.nodeID, N)`. So both the list dir and its entries round-trip an NFS filehandle. Both
+engines implement this identically.
 
 **Snapshot metadata.** A `snaps: snapId → { ctime, label }` table records, for each sealed
 snapshot, the logical time it was taken (`ctime = now()`, §3.5) and an optional caller

@@ -219,6 +219,7 @@ void registerLua(sol::state_view lua) {
     t["open"] = &luaOpen;
     t["mem"] = &luaMem;
     t["fsInfo"] = &fsInfoLua;
+    t["SNAPSHOT_NAME"] = SNAPSHOT_NAME;
 }
 
 } // namespace prfs

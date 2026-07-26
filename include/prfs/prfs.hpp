@@ -23,6 +23,10 @@ enum class Error { OK, NOENT, EXIST, NOTDIR, ISDIR, INVAL, NOTEMPTY, PERM };
 using SnapId = uint64_t;
 inline constexpr SnapId LATEST = ~SnapId(0); // resolve at cur_snap (dynamic)
 
+//  Reserved name of the per-directory snapshot-list directory, synthesized by
+//  the store (design §3.2). `D/.snapshot/N` resolves to D viewed at snapshot N.
+inline constexpr char const* SNAPSHOT_NAME = ".snapshot";
+
 class INode { // handle carries (id, snap)
 public:
     virtual ~INode() = default;

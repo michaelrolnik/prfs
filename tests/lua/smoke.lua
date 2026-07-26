@@ -102,4 +102,10 @@ local labelled = s:snapshot("release-1")
 local si = s:snapInfo(labelled)
 assert(si.id == labelled and si.ctime == 1700000000 and si.label == "release-1")
 
+-- synthesized .snapshot directory -------------------------------------------
+local sd = s:lookup(root, prfs.SNAPSHOT_NAME)
+assert(sd and sd:type() == prfs.Type.DIR and sd:mode() == 0x16d) -- 0555
+assert(#s:readdir(sd) >= 1, ".snapshot lists snapshots")
+assert(s:link(root, prfs.SNAPSHOT_NAME, s:mkfile("")) == prfs.Error.INVAL, "name reserved")
+
 print("prfs lua smoke: OK")
