@@ -8,8 +8,9 @@
 -- GENERATES content (never stores it), a multi-terabyte tree is only a few MB of
 -- metadata.
 --
--- Files are sized so the whole tree sums to a target total, a filesystem-wide
--- content policy is set, and several snapshots are taken.
+-- Files get random, heavy-tailed sizes (many small, a few large — like a real
+-- tree), scaled so the whole batch still sums to a target total; a
+-- filesystem-wide content policy is set, and several snapshots are taken.
 --
 -- Build a persistent store, then serve it over NFS:
 --   ./build/prfs-test examples/bigtree.lua /tmp/prfs-big 4 5 8
@@ -86,9 +87,20 @@ end
 
 build(fs:root(), "", 1)
 
--- Distribute the target total across all files (content is generated to size).
-local fsize = math.max(1, math.floor(total / math.max(1, #files)))
-for _, f in ipairs(files) do f.node:setSize(fsize) end
+-- Give each file a random, heavy-tailed weight (log-uniform over ~3 orders of
+-- magnitude: many small files, a few large), then scale the weights so the whole
+-- batch still sums to the target total. Seeded RNG ⇒ same sizes every run.
+-- Content is generated to whatever size is set; nothing is stored.
+local function randWeight() return math.exp(math.random() * 6.9) end -- ~1x .. 1000x
+
+local wsum = 0
+for _, f in ipairs(files) do f.weight = randWeight(); wsum = wsum + f.weight end
+for _, f in ipairs(files) do
+  f.node:setSize(math.max(1, math.floor(total * f.weight / wsum)))
+end
+
+-- A fresh random size on the same distribution, for the new day-round files.
+local function randSize() return math.max(1, math.floor(total * randWeight() / wsum)) end
 
 -- Snapshot the freshly built tree, then a few "daily" rounds: modify a couple
 -- of existing files (content + attrs) and add a directory of new files.
@@ -103,7 +115,7 @@ for day = 1, 3 do
   fs:link(fs:root(), "day-" .. day, d)
   for i = 1, math.random(1, maxFiles) do
     local f = fs:mkfile("")
-    f:setSize(fsize)
+    f:setSize(randSize())
     fs:link(d, string.format("new-%d.bin", uniq()), f)
     files[#files + 1] = { node = f, path = "/day-" .. day }
   end
