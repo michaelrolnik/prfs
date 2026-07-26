@@ -1,151 +1,128 @@
 # prfs content provider — design
 
-The **content provider** (`libprfs_content`) turns a regular file's *block structure* (its
-recipe) into bytes, on demand, at any offset. It is the `READ` path of the synthetic NFS
-target. It is a **separate module**: the metadata store (`libprfs`) never parses content — it
-only interns the opaque recipe bytes under a `contentID` (design §2.1). This doc specifies the
-recipe format, the deterministic generator, and the module's API.
+The **content provider** (`libprfs_content`) turns a regular file into bytes, on demand, at any
+offset. It is the `READ` path of the synthetic NFS target. It is a **separate module**: the
+metadata store (`libprfs`) never generates or stores content bytes.
+
+The defining choice: **content bytes are never stored — they are generated on the fly** from a
+small **config** plus the file's identity. The prfs DB holds only metadata and that config; a
+file's data is a pure function of `(config, fileSeed, offset)`.
 
 > **Development principles (binding, design §13):** SOLID, test-first (a failing test first,
 > then code to green), clang-format enforced. Same rules as the core library.
 
 ---
 
-## 1. Scope
+## 1. Where the config lives (what the DB stores)
 
-- **In scope:** a recipe format; a pure, deterministic, random-access byte generator
-  (`read(recipe, size, offset, len)`); patterns (hole / zero / fill / random / dedup); a
-  recipe builder + (de)serializer; Lua bindings for scenarios.
-- **Out of scope:** the metadata namespace (that is `libprfs`), the NFS wire protocol (that is
-  L2), and any persistence — the provider is stateless and holds no store.
+Configuration granularity, coarse to fine:
 
-The provider consumes what the store already exposes per regular file: `node.content()` (the
-serialized recipe, the interned block structure) and `node.size()` (authoritative length, T7).
+- **Filesystem (mandatory).** One `ContentConfig` for the whole store, held in `meta`
+  (`"content_config"`). This is the base every file uses.
+- **Folder (nice-to-have).** A directory may carry an override that applies to the subtree
+  below it, inherited by descendants until another override. Stored as `folderContent: nodeID →
+  ContentConfig` (a small table; phase-2, off by default).
+- **File (none).** A file stores **no** content recipe. Its characteristics are *derived* from
+  its node id (see §4). Per-file configuration is deliberately not a thing — it buys nothing for
+  a synthetic target and would bloat every node.
+
+So the DB stores: metadata (always) + one FS config + optional folder overrides. **Never block
+data.** A `READ` regenerates bytes; a snapshot of a 10 TB tree costs kilobytes.
 
 ```
-READ(node, offset, len):                        # the L2 front-end will do this
-    recipe = content::deserialize(node.content())
-    return content::read(recipe, node.size(), offset, len)
+READ(node, offset, len):                         # the L2 front-end will do this
+    cfg  = effectiveConfig(node)                  # folder override ↑ tree, else FS config
+    seed = node.id()                              # the file's stable identity
+    return content::read(cfg, seed, node.size(), offset, len)
 ```
+
+(Literal small files still work: if a node has explicit `content()` bytes, the front-end serves
+those verbatim and skips the generator. Procedural files — the common case — have none.)
 
 ---
 
 ## 2. Requirements
 
-1. **Deterministic & reproducible.** `read` is a pure function of `(recipe, size, offset, len)`.
-   The same inputs yield the same bytes on every host and every run — no wall-clock, no
-   `Math.random`, defined endianness and wrapping arithmetic. This is what makes a whole test
-   scenario reproducible.
-2. **Random access.** Byte at `offset` is computable in `O(blockSize)` without generating the
-   preceding bytes, so a tester can `READ` a range deep inside a multi-terabyte file cheaply.
-   Reading `[0,N)` in one call must equal the concatenation of any partition of that range.
-3. **Size-authoritative (T7).** `size` bounds output: a `read` past `size` returns a short
-   count (EOF); the recipe's extent lengths are advisory geometry, `size` is the truth.
-4. **Controllable for backup testing.** The knobs a backup/archive tool cares about are
-   first-class: **compressibility** (entropy ratio), **dedup** (unique-block ratio), and
-   **sparseness** (holes). These let a scenario target a specific dedup ratio or compression
-   ratio and observe how the tool behaves.
+1. **Deterministic & reproducible.** `read` is a pure function of `(config, fileSeed, size,
+   offset, len)` — same inputs, same bytes on every host and run. No wall-clock, no ambient
+   randomness; defined endianness and wrapping arithmetic. `fileSeed = nodeID`, and node ids are
+   allocated deterministically, so a rebuilt tree yields identical content.
+2. **Random access.** The byte at `offset` is computable in `O(blockSize)` without generating
+   the preceding bytes, so a tester can `READ` deep inside a multi-terabyte file cheaply.
+   Reading `[0,N)` in one call equals the concatenation of any partition of that range.
+3. **Size-authoritative (T7).** `size` (a node attribute) bounds output: a `read` past `size`
+   returns a short count (EOF). The generator produces exactly `size` bytes of geometry.
+4. **The knobs a backup/archive tool cares about, FS-wide:**
+   - **entropy** — bits/byte; *compressibility is the derived `1 − entropy/8`*.
+   - **dedup** — a global pool of `U` distinct blocks shared across the whole FS.
+   - **sparseness** — a fraction of blocks that are holes (unallocated, read as zeros).
 
 ---
 
-## 3. The block structure (recipe)
+## 3. ContentConfig
 
-Per design §11.2, a recipe is an **ordered list of extents**; each extent is a **procedural
-recipe** covering a contiguous byte range. The whole-file-from-one-seed case is a single
-extent. Sparse files interleave `HOLE` extents. Block-level dedup uses the `DEDUP` pattern.
+```cpp
+struct ContentConfig {
+    uint32_t blockSize     = 4096;  // generation & dedup granularity (D3)
+    uint8_t  entropy       = 255;   // 0..255 ⇒ 0..8 bits/byte (255 = incompressible)
+    uint8_t  sparsePercent = 0;     // 0..100: share of a file's blocks that are holes
+    uint64_t dedupPool     = 0;     // 0 = every block unique; N = N distinct blocks FS-wide
+};
 
-### 3.1 Patterns
-
-| Pattern  | Bytes produced                                             | Params            |
-| -------- | ---------------------------------------------------------- | ----------------- |
-| `HOLE`   | zeros; **sparse** — not counted in `st_blocks`             | —                 |
-| `ZERO`   | zeros; allocated (counted in `st_blocks`)                  | —                 |
-| `FILL`   | a constant byte repeated (`ONE` = `FILL 0xFF`)             | `byte`            |
-| `RANDOM` | seeded pseudo-random, `compressibility`-controlled entropy | `seed`, `compress`|
-| `DEDUP`  | blocks drawn from a pool of `U` distinct random blocks     | `seed`, `unique`  |
-
-`SEEDED` in earlier notes is just `RANDOM` with an explicit `seed`. `compress ∈ 0..255` is the
-approximate compressible fraction of each block (`0` = incompressible, `255` ≈ all filler).
-`unique = U` is the number of distinct blocks a `DEDUP` extent cycles through, so its dedup
-ratio ≈ `blocks / U`.
-
-### 3.2 Extent record
-
-```
-Extent = { pattern:u8, length:u64, seed:u64, param0:u32, param1:u32 }
-    length          bytes this extent covers (advisory; size wins, req. 3)
-    seed            base seed for RANDOM/DEDUP
-    param0          FILL: byte; RANDOM: compress(0..255); DEDUP: compress
-    param1          DEDUP: unique-block count U
+serialize:   magic("PCC1") ‖ blockSize:u32 ‖ entropy:u8 ‖ sparsePercent:u8 ‖ pad ‖ dedupPool:u64
 ```
 
-### 3.3 Serialization
-
-The interned `content` blob the store holds is:
-
-```
-recipe := magic("PRC1") ‖ blockSize:u32 ‖ extentCount:u32 ‖ Extent*   # all fields little-endian
-```
-
-`blockSize` is the per-file generation/dedup granularity (D3): resolved from the fs default at
-create, overridable per file. `deserialize` validates the magic and returns `{blockSize,
-extents}`; malformed input is a hard error (the store never hands out non-recipe bytes).
-
-Because the blob is hash-deduplicated by the store, two files with an identical recipe share
-one `contentID` — file-level dedup — while `DEDUP` extents give block-level dedup *within* a
-file. The two compose (design §9 `logicalSize` vs `physicalSize`).
+`blockSize` is FS-level (a per-folder override is the only finer grain, §1) — never per-file.
+It feeds `statfs f_bsize` and the FSINFO transfer granularity (design §9). `entropy` and
+`dedupPool` are the compression- and dedup-ratio dials; `sparsePercent` the sparse dial.
 
 ---
 
-## 4. Deterministic random-access generation
+## 4. Generation — derived per file, per block
 
-Generation is **block-indexed**. For a byte at file offset `o`, `block = o / blockSize`; the
-provider generates the covering block(s) and copies out the requested slice. Blocks are
-independent, so any range is reachable directly (req. 2).
+Everything is **block-indexed**. For byte offset `o`, `block = o / blockSize`; the provider
+generates the covering block(s) and copies out the requested slice. Blocks are independent, so
+any range is reachable directly (req. 2). Per-file variety comes from mixing the `fileSeed` into
+every derivation — no two files (different node ids) generate the same stream, yet each is
+reproducible.
 
-### 4.1 Per-block bytes
-
-A block is filled with 64-bit words from a **counter-based mixer** (random-access by
-construction — no streaming state). With the SplitMix64 finalizer as the mixer:
+Mixer (SplitMix64 finalizer; all multiplies wrap mod 2⁶⁴):
 
 ```
 mix64(x):  x ^= x>>30; x *= 0xbf58476d1ce4e5b9;
            x ^= x>>27; x *= 0x94d049bb133111eb;
-           x ^= x>>31; return x            # all multiplies wrap mod 2^64
-
+           x ^= x>>31; return x
 GOLDEN = 0x9E3779B97F4A7C15
-blockKey(seed, blockIndex) = mix64(seed ^ (blockIndex * GOLDEN))
-word(seed, blockIndex, j)  = mix64(blockKey(seed, blockIndex) + j * GOLDEN)
+h(a,b,tag) = mix64(mix64(a*GOLDEN + b) + tag)         # a portable coordinate hash
 ```
 
-Word `j` of the block is `word(...)` serialized **little-endian**; the block is the first
-`blockSize` bytes of `word 0, word 1, …`. This is not cryptographic — it is a fast, portable,
-well-distributed synthetic stream. (A counter RNG like Philox is a drop-in upgrade if a
-scenario ever needs statistical-test-grade output; the interface does not change.)
+For file `S`, block `b`, config `C`:
 
-### 4.2 Pattern application, per block
+1. **Sparse?** `isHole = h(S, b, HOLE_TAG) % 100 < C.sparsePercent`. If so the block is zeros and
+   is **not** counted in `st_blocks` (§5); done.
+2. **Pick the block's source seed:**
+   - `C.dedupPool == 0`: `src = h(S, b, DATA_TAG)` — unique per (file, block).
+   - else: `canon = h(S, b, DEDUP_TAG) % C.dedupPool; src = h(0, canon, POOL_TAG)` — the pool is
+     keyed on `0` (not `S`), so identical `canon` across *different files* yields identical
+     blocks → **cross-file dedup**, ratio ≈ totalBlocks / `dedupPool`.
+3. **Fill at target entropy.** With `K = clamp(round(2^(8·entropy/255)), 1, 256)` equiprobable
+   symbols: word `j` of the block is `mix64(src + j·GOLDEN)`; each output byte becomes
+   `symbol = value % K` mapped to `symbol·255/(K−1)` (or `0` when `K==1`). The stream then
+   carries `log2(K) ≈ 8·entropy/255` bits/byte, and a compressor reduces it to ≈ that ratio.
+   `entropy=255 ⇒ K=256` incompressible; `entropy=0 ⇒ K=1` constant (fully compressible).
 
-- `HOLE` / `ZERO`: the block is zeros (they differ only in `st_blocks`, §5).
-- `FILL`: the block is `param0` repeated.
-- `RANDOM`: the first `floor(blockSize * compress/255)` bytes are `0x00` (compressible filler),
-  the rest are the `word()` stream. `compress = 0` ⇒ fully incompressible.
-- `DEDUP`: the block's content is the `RANDOM` content of **canonical block** `blockIndex % U`
-  — so the extent cycles through `U` distinct blocks. A deduplicating tool collapses it to `U`.
-
-Every case is a pure function of `(seed, blockIndex)` and the params — satisfying reqs. 1–2.
+Each step is a pure function of `(S, b, C)` — satisfying reqs. 1–2.
 
 ---
 
 ## 5. Size authority & sparseness (T7)
 
-`read(recipe, size, offset, len)` clamps to `size`: it produces `min(len, size - offset)`
-bytes (0 if `offset >= size`). Extent `length`s lay out geometry; if they sum below `size` the
-tail reads as `ZERO`, if above they are truncated — `size` always wins.
-
-Sparseness is reported, not just read: a `HOLE` extent's blocks are **not** counted in
-`st_blocks` (they read as zeros but occupy no "space"), while `ZERO` blocks are. The provider
-exposes `allocatedBlocks(recipe, size)` so the front-end can answer `st_blocks` — letting a
-scenario test how a backup tool handles sparse files vs zero-filled ones.
+`read(cfg, seed, size, offset, len)` produces `min(len, size − offset)` bytes (0 if
+`offset ≥ size`) — `size` always wins over block geometry. `allocatedBlocks(cfg, seed, size)`
+returns the 512-byte block count actually "allocated" (holes excluded), so the front-end can
+answer `st_blocks` — letting a scenario test how a backup tool treats sparse vs zero-filled
+files. Because sparseness is derived from `(seed, block)`, it is stable and reproducible per
+file.
 
 ---
 
@@ -154,60 +131,49 @@ scenario test how a backup tool handles sparse files vs zero-filled ones.
 ```cpp
 namespace prfs::content {
 
-enum class Pattern : uint8_t { HOLE, ZERO, FILL, RANDOM, DEDUP };
+struct ContentConfig { uint32_t blockSize = 4096; uint8_t entropy = 255;
+                       uint8_t sparsePercent = 0; uint64_t dedupPool = 0; };
 
-struct Extent {
-    Pattern  pattern = Pattern::ZERO;
-    uint64_t length  = 0;
-    uint64_t seed    = 0;
-    uint32_t param0  = 0;   // FILL: byte; RANDOM/DEDUP: compress
-    uint32_t param1  = 0;   // DEDUP: unique-block count
-};
+std::string   serialize(ContentConfig const&);
+ContentConfig deserialize(std::string_view);       // throws on bad magic/format
 
-struct Recipe {
-    uint32_t            blockSize = 4096;
-    std::vector<Extent> extents;
-};
+//  Fill up to `len` bytes of the range at `offset`, bounded by `size`; returns
+//  the count produced (a short count == EOF). Pure; no store, no engine.
+size_t read(ContentConfig const&, uint64_t fileSeed, uint64_t size,
+            uint64_t offset, char* out, size_t len);
 
-std::string serialize(Recipe const&);              // → the interned content blob
-Recipe      deserialize(std::string_view);         // throws on bad magic/format
-
-//  Fill up to `len` bytes of the range at `offset`, bounded by `size`.
-//  Returns the number of bytes actually produced (a short count == EOF).
-size_t read(Recipe const&, uint64_t size, uint64_t offset, char* out, size_t len);
-
-//  st_blocks support: 512-byte blocks actually "allocated" (HOLE excluded).
-uint64_t allocatedBlocks(Recipe const&, uint64_t size);
+//  st_blocks support: 512-byte blocks allocated (holes excluded).
+uint64_t allocatedBlocks(ContentConfig const&, uint64_t fileSeed, uint64_t size);
 
 } // namespace prfs::content
 ```
 
-The module depends only on the standard library (no `libprfs`, no engine) — it is a leaf. The
-front-end and Lua harness pull it in alongside the store.
+The module depends only on the standard library (a leaf — no `libprfs`, no engine). The
+front-end and Lua harness pull it in alongside the store; the store supplies the effective
+config and `fileSeed = node.id()`.
 
 ---
 
 ## 7. Testing (test-first)
 
-Each behaviour gets a failing test before code. Planned `tests/content/*`:
+Each behaviour gets a failing test before code (`tests/content/*`):
 
-- **Determinism** — same `(recipe, offset, len)` yields identical bytes across two calls and
-  two freshly-built recipes; no hidden state.
-- **Random-access equivalence** — reading `[0,N)` in one call equals the concatenation of an
-  arbitrary partition of `[0,N)` (page-by-page, byte-by-byte, mis-aligned to `blockSize`).
-- **Size/EOF** — reads clamp to `size`; `offset >= size` yields 0; extents under/over `size`
-  behave per §5.
-- **Patterns** — `ZERO`/`HOLE` all-zero; `FILL` constant; `RANDOM` `compress` shifts the
-  zero-fraction monotonically; two identical `RANDOM` extents match, different seeds differ.
-- **Dedup** — a `DEDUP U` extent contains exactly `U` distinct block contents; block `b`
-  equals block `b + U`; `allocatedBlocks`/dedup ratio track `U`.
-- **Sparse** — `HOLE` reads zeros but is excluded from `allocatedBlocks`; `ZERO` is included.
-- **Serialize round-trip** — `deserialize(serialize(r)) == r`; bad magic / truncated blob is a
-  hard error.
+- **Determinism** — same `(config, seed, offset, len)` → identical bytes across calls; a
+  different `seed` gives a different stream (files differ), same seed reproduces (rebuild-safe).
+- **Random-access equivalence** — `[0,N)` in one call equals any partition of it (page-by-page,
+  byte-by-byte, mis-aligned to `blockSize`).
+- **Size/EOF** — reads clamp to `size`; `offset ≥ size` → 0.
+- **Entropy** — measured byte-alphabet size / order-0 entropy tracks `entropy` monotonically;
+  `entropy=255` uses ~all 256 values, `entropy=0` is constant.
+- **Dedup** — with `dedupPool=U`, the number of distinct block contents across many files is
+  ≤ `U`; two different files share blocks when `canon` collides; `dedupPool=0` → all unique.
+- **Sparse** — ≈ `sparsePercent` of blocks are holes; holes read zero and are excluded from
+  `allocatedBlocks`.
+- **Config round-trip** — `deserialize(serialize(c)) == c`; bad magic / truncated is a hard error.
 
-A cross-check against the store: a scenario that `mkfile(serialize(recipe))` + `setSize(size)`,
-then reads via `content::read(deserialize(node.content()), node.size(), …)`, proving the
-store↔provider handoff.
+Integration cross-check: a scenario stores an FS config, creates files (metadata only), and
+verifies `content::read(cfg, node.id(), node.size(), …)` — proving the store↔provider handoff
+holds nothing but config + node id.
 
 ---
 
@@ -215,22 +181,21 @@ store↔provider handoff.
 
 - `libprfs_content` static library from `src/content/*.cpp` + `include/prfs/content.hpp`; added
   to the clang-format `fmt_files` gate; tests under `tests/content/` wired like the others.
-- **Lua** (`prfs.content`): a recipe builder (`content.recipe{blockSize=, ...extents}`),
-  `content.serialize/deserialize`, and `content.read(recipe, size, off, len)` so scenarios can
-  attach content to a node and assert the bytes a `READ` would return.
-- Gated by a build option (`-Dcontent`, default on) mirroring `-Dlua`, so the core can build
-  standalone.
+- **Store integration:** an FS `ContentConfig` in `meta` (a config setter/getter on `IPrfs`);
+  the per-folder override table is phase-2.
+- **Lua** (`prfs.content`): build/serialize a config, and `content.read(cfg, seed, size, off,
+  len)` so scenarios can assert the bytes a `READ` would return.
+- Gated by a build option (`-Dcontent`, default on) mirroring `-Dlua`.
 
 ---
 
 ## 9. Open questions
 
-- **Compressibility model.** The per-block "zero-prefix" gives an approximate, monotonic ratio;
-  a scenario wanting a precise post-compression size may need an entropy-shaping model instead.
-  Start approximate; revisit if a test needs exactness.
-- **Cross-file dedup pools.** `DEDUP` dedups *within* a file. Sharing a block pool *across*
-  files (a global dedup corpus) would need a pool id in the recipe — deferred until a
-  multi-file dedup scenario asks for it.
-- **`allocatedBlocks` vs the store's `totalSize`.** The store's O(1) `totalSize` (§9) is
-  logical (`Σ size`); physical/allocated accounting (holes, dedup) is the provider's, feeding
-  the phase-2 `logicalSize`/`physicalSize` dedup ratio.
+- **Entropy realism.** An i.i.d. reduced alphabet gives a clean order-0 entropy target; an LZ
+  compressor may do slightly better/worse depending on incidental repeats. Good enough for a
+  ratio dial; revisit only if a scenario needs a precise post-compression size.
+- **Per-folder overrides.** Specified but phase-2 — start FS-wide only. The inheritance walk (up
+  to the nearest override) is the only added read cost when enabled.
+- **File-size distribution.** How *big* generated files are (and the tree shape) is a *generator*
+  concern (who calls `mkfile`/`setSize`), not the content provider's — likely a separate
+  scenario-builder helper, out of scope here.

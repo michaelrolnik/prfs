@@ -79,13 +79,17 @@ fields rather than carrying a fat struct):
 - **Symlink**: `readlink(node,G)` → `strings[getattr(node,G).spec].bytes`.
 - **Device**: the `(major, minor)` pair is the whole "content"; it packs into the 64-bit
   `spec` directly (this is the old `spec`; NFS `specdata1`/`specdata2`).
-- **Regular file**: `spec` is a `contentID` into the interned `content` table, whose
-  entry is the opaque *block structure* (the extent/pattern recipe). Because `content` is
-  hash-deduplicated, two identical files share one `contentID` → metadata-level dedup, and
-  the block structure is stored once. The store never parses it; the content provider does.
+- **Regular file**: content is **generated on the fly, not stored** (§11.2, `docs/content.md`).
+  A file's bytes are a pure function of `(effective ContentConfig, nodeID as seed, offset)`, so
+  `spec` needs no per-file recipe — dedup, entropy, and sparseness are FS-wide config knobs, and
+  per-file variety comes from hashing the `nodeID`. (An optional *literal* small file may still
+  carry stored bytes; the common procedural case carries none. The old interned `content`/
+  `contentID` table is retained only for that optional literal path.)
 
-There is deliberately **no per-node `seed`** — a regular file's content recipe (seed,
-compressibility, dedup, block patterns) lives inside its shared `content` entity.
+The file's **`nodeID` is its content seed** — no separate per-node `seed` field, and no
+per-file recipe. Compressibility (entropy), dedup, and sparseness are **filesystem-level**
+config (§11.2), not per-file attributes; hashing the `nodeID` into the generator gives each
+file a distinct-but-reproducible stream.
 
 **`size` is authoritative for `st_size`.** The per-node `size` attribute — not the shared
 block structure — is what `GETATTR`/`READ` report and what the content provider is asked to
@@ -714,22 +718,24 @@ break it). v1 ships **one bucket per directory**, byte-identical to §3.3; a dir
 big (generator hint or a fan-out threshold) gets more buckets and COWs only the touched one.
 `linkMode`/bucket-count stays reserved (§5, T8) until the multi-bucket path is implemented.
 
-### 11.2 Content layout — **extent list of procedural recipes** (D2)
+### 11.2 Content — **config-driven, generated per file; nothing stored** (D2)
 
-Both, composed: a `content` block structure is an **ordered list of extents**, and each extent
-is a **procedural recipe** `{ pattern, seed, params, length }` (patterns ZERO/ONE/RANDOM/
-SEEDED/DEDUP). The common whole-file-from-one-seed case is a single extent; a `HOLE` extent
-models sparseness; an extent referencing a shared block recipe models block-level dedup. This
-is size-parametric (§2.1): the node's `size` bounds how many bytes the provider emits. The
-store still only interns opaque bytes; the concrete format is the content provider's (L1).
+Content bytes are **never stored** — they are generated on the fly from a small
+**`ContentConfig`** plus the file's `nodeID` as its seed. There is **no per-file recipe**: a
+file's bytes are a pure function of `(effective config, nodeID, offset)`, and per-file variety
+(which blocks are holes, which dedup-pool block) falls out of hashing the node id. Config
+granularity is the **whole filesystem** (mandatory, one record in `meta`) with an optional
+**per-folder override** (inherited; nice-to-have). Knobs: `blockSize`, `entropy` (bits/byte),
+`dedupPool` (FS-wide unique-block count), `sparsePercent`. Size-authoritative (§2.1/T7): the
+node's `size` bounds output. Specified in [`docs/content.md`](content.md) (L1).
 
-### 11.3 Block size — **fs-global default + per-file override, denormalized** (D3)
+### 11.3 Block size — **filesystem-level (+ folder override); not per-file** (D3)
 
-One fs-level default block size (feeds `statfs f_bsize` and the FSINFO transfer granularity,
-§9); a `REG` node may override it via its recipe for dedup-boundary tests. The effective
-`blockSize` is resolved at create and **denormalized onto the node** so `st_blksize`/`st_blocks`
-are O(1) and reproducible. Not per-directory (rarely useful, adds a resolution step). The
-`blockSize` node field is reserved until L1 lands (like `linkMode`).
+`blockSize` is part of the `ContentConfig` (§11.2), set for the **whole FS** with an optional
+per-folder override — never per file, never denormalized onto nodes. It is the content
+generation and dedup granularity and feeds `statfs f_bsize` / the FSINFO transfer granularity
+(§9). `st_blocks` comes from the provider's `allocatedBlocks` (holes excluded), not a stored
+per-node count.
 
 ### 11.4 GC — **invariant fixed now, compaction later** (D5)
 
