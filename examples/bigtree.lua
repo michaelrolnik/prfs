@@ -38,6 +38,7 @@ end
 local nfiles = math.floor(branching ^ depth)
 local fsize  = math.max(1, math.floor(total / nfiles))
 local files  = 0
+local marked = {} -- a couple of leaf files we mutate each "day"
 
 local function build(dir, level)
   if level >= depth then
@@ -45,6 +46,7 @@ local function build(dir, level)
       local f = fs:mkfile("")
       f:setSize(fsize)
       fs:link(dir, string.format("file-%03d.bin", i), f)
+      if #marked < 2 then marked[#marked + 1] = f end
       files = files + 1
     end
   else
@@ -63,6 +65,13 @@ local snaps = { fs:snapshot("base") }
 for day = 1, 3 do
   t = t + 86400 -- +1 day
   fs:setTime(t)
+
+  -- Modify existing nodes so the diff shows more than additions: a new content
+  -- seed (a "rewrite", MODIFIED_CONTENT) and a permission change (MODIFIED_ATTRS).
+  if marked[1] then fs:setContentSeed(marked[1], 1000 + day) end
+  if marked[2] then marked[2]:setMode(0600 + day) end
+
+  -- Add a day's worth of new files.
   local d = fs:mkdir()
   fs:link(fs:root(), "day-" .. day, d)
   for i = 1, branching do
@@ -87,4 +96,26 @@ print(string.format("  files=%d dirs=%d links=%d", files, st.nodes[1], st.links)
 print(string.format("  logical size = %s  (nothing stored — content is generated)",
   human(st.totalSize)))
 print("  snapshots (id): " .. table.concat(snaps, ", "))
+
+-- What changed between consecutive snapshots (diffPaths names + diffNodes tally).
+print("changes between snapshots:")
+for i = 2, #snaps do
+  local a, b = snaps[i - 1], snaps[i]
+
+  local added, removed, sample = 0, 0, {}
+  for _, p in ipairs(fs:diffPaths(a, b)) do
+    if p.change == prfs.PathChange.ADDED then added = added + 1 else removed = removed + 1 end
+    if #sample < 4 then
+      sample[#sample + 1] = (p.change == prfs.PathChange.ADDED and "+" or "-") .. p.name
+    end
+  end
+
+  local nc = { 0, 0, 0, 0 } -- CREATED, REMOVED, MODIFIED_CONTENT, MODIFIED_ATTRS
+  for _, d in ipairs(fs:diffNodes(a, b)) do nc[d.change + 1] = nc[d.change + 1] + 1 end
+
+  print(string.format("  %d -> %d: paths +%d -%d  |  nodes created=%d removed=%d content=%d attrs=%d",
+    a, b, added, removed, nc[1], nc[2], nc[3], nc[4]))
+  print("           e.g. " .. table.concat(sample, " "))
+end
+
 print("serve it:  prfs-host --store " .. path .. " --port 20490")
