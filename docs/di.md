@@ -5,11 +5,10 @@ by `(interface-id, name)`; consumers resolve by interface (with an optional name
 substrate the plugin host ([`plugins.md`](plugins.md)) and the built-in extension points (rng
 generators, storage engines) all share — one wiring mechanism instead of three.
 
-It follows the well-worn **service-locator / DI** pattern (named binding, variant *names*,
-fail-loud on unresolved, per-scope isolation, introspection) but re-expressed idiomatically in
-C++: **typed** (no `void*` vtable patching), **RAII** (scopes are objects, no teardown
-machinery), and **explicit** (no `__attribute__((constructor))` magic, no C ABI). §8 lays out the
-choices against a C-style runtime-linker container and why we made them.
+It is the well-worn **service-locator / DI** pattern (named binding, variant *names*, fail-loud on
+unresolved, per-scope isolation, introspection), kept **typed**, **RAII**, and **explicit**: no
+`void*` vtable patching, no teardown bookkeeping, no `__attribute__((constructor))` magic, no C
+ABI. §8 collects the design decisions.
 
 > **Development principles (binding, design §13):** SOLID, test-first, clang-format.
 
@@ -93,9 +92,8 @@ convention for a type-erased registry, made explicit by versioning the ID.
 
 ## 3. Fail-loud (unresolved dependencies)
 
-One classic way to make a missing dependency safe is to point an unresolved interface at a
-sentinel vtable that `abort()`s with a backtrace when called, instead of leaving a null that
-segfaults. We get the same guarantee more simply, because we *pull*:
+A missing dependency must fail loudly, not become a silent null that segfaults on first use. Two
+mechanisms, both catching it at wiring time:
 
 - **`resolve<Intf>()` throws `di::Unresolved`** (message = interface ID + name) rather than
   returning a surprise null — you cannot accidentally deref an unwired dependency.
@@ -110,10 +108,9 @@ don't need an abort-on-call sentinel proxy.
 
 ## 4. Scopes = `Registry` instances (RAII)
 
-A C-style container needs explicit `scope_create`/`destroy`/`teardown` (and orphan-root
-gymnastics) because its registration is global and constructor-time, and a `dlopen`'d module can
-outlive the scope that adopted it. We sidestep all of that: **a scope is just a `Registry`
-value.**
+**A scope is just a `Registry` value.** Construction opens it, destruction closes it — no
+explicit teardown, no bookkeeping even for a `dlopen`'d module that outlives the scope it
+registered into.
 
 ```cpp
 di::Registry r;                       // a hermetic scope
@@ -143,14 +140,13 @@ implicit macro side-effects.
 
 ---
 
-## 6. Names — pull, not push
+## 6. Names — resolved on demand
 
-A **push**-binding container patches import-slots as providers arrive, so selecting a variant
-means *refining already-bound imports* and *replaying* a remembered name list — real machinery.
-Ours is **pull**: `resolve<Intf>(name)` is just a lookup key, chosen when the consumer asks —
-simpler, and it needs no replay. The build/CLI sets the default name per interface (`-Dstorage=` →
-engine name, `-Drng=` → rng name); `resolve<Intf>("")` returns the unnamed provider when there is
-exactly one, else the selected default.
+The name is a lookup key: `resolve<Intf>(name)` runs when the consumer asks for the service.
+Nothing patches slots as providers register, so there is no binding order to track and no replay.
+The build/CLI sets the default name per interface (`-Dstorage=` → engine name, `-Drng=` → rng
+name); `resolve<Intf>("")` returns the unnamed provider when there is exactly one, else the
+selected default.
 
 ---
 
@@ -163,23 +159,29 @@ plugin host does it, on load/unload).
 
 ---
 
-## 8. Design choices (vs a C-style runtime linker)
+## 8. Design choices
 
-| A C-style runtime-linker container     | prfs `di`                                  |
-| -------------------------------------- | ------------------------------------------ |
-| named, decoupled import/export binding | ✅ `(interface-id, name)` keyed registry |
-| names (variant selection)            | ✅ kept — pull-side lookup key             |
-| unresolved sentinel (fail loud)        | ✅ `resolve` throws · `requireAllResolved` |
-| scopes (test isolation)                | ✅ a `Registry` object (RAII)              |
-| introspection / checkup                | ✅ `ids`/`names`/`has`/`resolveAll`      |
-| C ABI, `void*` vtable patching         | ❌ keep C++ interfaces (type-safe)         |
-| `__attribute__((constructor))` macros  | ❌ explicit or typed `Register`            |
-| dlopen/orphan-root/teardown machinery  | ❌ RAII + the plugin host handle lifetime  |
-| push-binding + name replay           | ❌ pull (`resolve` on demand)              |
+The registry is deliberately small, typed, and explicit. The decisions:
 
-Net: the decoupling + names + fail-loud + test-scopes of a runtime-linker DI, at a fraction of
-the code, with C++ type-safety and RAII intact — without undoing the "C++ interfaces + `extern
-"C"` factory" boundary decision.
+- **Typed, not `void*`.** Providers are `Intf*`; `provide`/`resolve` are templates keyed on the
+  interface type, so callers never handle untyped pointers. The single type-erasure point (the
+  internal slot) is bounded by the ID↔type contract (§2).
+- **Named binding.** Services are keyed by `(interface-id, name)`, so a consumer names *what* it
+  needs, not *who* provides it — providers and consumers never reference each other.
+- **Names select variants.** The optional name picks among implementations of one interface
+  (engine `lmdb`/`memory`, rng `philox`/`threefry`); the build/CLI sets the default (§6).
+- **Fail loud.** `resolve` throws and `requireAllResolved` validates at startup, so a missing
+  dependency is a clear error at wiring time, never a silent null (§3).
+- **Pull.** A consumer resolves when it needs a service; nothing patches slots as providers
+  register, so there is no binding order to manage and no replay (§6).
+- **Scopes are objects.** A `Registry` value *is* a scope — construction opens it, destruction
+  closes it — so tests get isolation for free with no teardown bookkeeping (§4).
+- **Explicit registration.** Providers register explicitly, or via a typed `static Register` for
+  compiled-in built-ins (kept by `link_whole`) — no constructor-time macro side effects (§5).
+
+Together these give the decoupling, variant-selection, fail-loud, and test-isolation of a full DI
+container while keeping C++ type-safety and RAII and staying within the "C++ interfaces + `extern
+"C"` factory" boundary.
 
 ---
 
