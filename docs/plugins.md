@@ -1,48 +1,59 @@
 # prfs plugin API — design
 
-prfs is a **host** for protocol front-ends. The core (the versioned filesystem `IPrfs`, the
-content provider, the rng) is served to the outside world by **plugins** — `nfsv3`, `nfsv4`,
-`mount`, and whatever else — loaded at runtime behind a stable API. A front-end is *not* baked
-into the core; it is a `.so` the host discovers, loads, and starts.
+prfs is a **host** for extensions. Rather than one hard-wired "plugin" shape, the system
+defines a small set of **interfaces, each with a stable ID**; a plugin **exports** whatever
+subset it implements (a protocol front-end, an rng generator, a storage engine — one plugin may
+export several); and the host **discovers what a loaded plugin exports and wires it up**. The
+host is also a **service container**: a component resolves a dependency by interface ID, whether
+that dependency is a core service or something another plugin exported. It is COM-lite
+capability discovery (`query` by ID) plus dependency injection — without COM's refcounting, since
+the host owns all lifetimes.
 
-> **Development principles (binding, design §13):** SOLID, test-first, clang-format. Same rules
-> as the rest of the tree.
+> **Development principles (binding, design §13):** SOLID, test-first, clang-format.
 
 ---
 
-## 1. Architecture
+## 1. Model
+
+- **Interfaces have IDs.** Each pluggable interface carries a stable, versioned string ID
+  (`"prfs.frontend/1"`). Bumping an interface = a new ID, so old and new never silently mix.
+- **Plugins export interfaces.** A plugin's root object answers "which interface IDs do you
+  provide?" and hands out a typed pointer per ID (`query`). A plugin may export many.
+- **The host discovers and acts.** On load it asks the plugin what it exports and does the right
+  thing per interface: a front-end is started, an rng is registered, an engine is made available.
+- **The host is a DI container.** `IHost::resolve(id)` returns a service by interface ID — a core
+  one (the store, the logger) or one another plugin exported — so plugins compose without knowing
+  each other concretely.
 
 ```
 prfs host (executable)
-  core   : IPrfs store (lmdb|memory) · content provider · rng
-  infra  : configuration (CLI11) · logging (spdlog)
-  loader : discover → load → ABI-check → create(host) → start();  stop()+unload on shutdown
+  core     : IPrfs store · content · rng · logger (spdlog) · config (CLI11)
+  container: resolve(interfaceId) → service*        (core + plugin-exported)
+  loader   : discover → load → create(host) → for each exported interface: wire it
       │
-      ├── plugins/nfsv3.so     serves NFSv3 over RPC
-      ├── plugins/mount.so     the MOUNT protocol
-      ├── plugins/nfsv4.so     NFSv4 (subset)
-      └── …                    any other front-end
+      ├── plugins/nfsv3.so   exports IFrontend
+      ├── plugins/mount.so   exports IFrontend
+      ├── plugins/fastrng.so exports IRng
+      └── plugins/rocks.so   exports IStorageEngine
 ```
-
-Layering is strict: `libprfs` knows nothing about plugins; the **host** owns the store and the
-loader; **plugins** depend only on the public prfs headers (`IPrfs`, `content`, `rng`) plus the
-plugin API header — never on engine internals. A plugin can be developed, built, and shipped
-without touching the core.
 
 ---
 
-## 2. The boundary (ABI)
+## 2. The ABI boundary
 
-**C++ abstract interfaces reached through an `extern "C"` factory.** The interfaces are ordinary
-C++ (so a plugin uses `IPrfs` directly, no C shim), while the *entry points* have C linkage so
-`dlsym` finds unmangled, stable symbols. An **ABI version** integer is checked at load; a
-mismatch is refused with a clear log line.
+**C++ interfaces reached through an `extern "C"` factory** (chosen: least boilerplate, reuses
+`IPrfs`/`IKvStore` directly). The interfaces are ordinary C++ (stable Itanium vtable ABI on
+Linux across gcc/clang); the entry points have C linkage so `dlsym` finds unmangled symbols. An
+**ABI version** is checked at load; a mismatch is refused. Constraint: plugins built against a
+compatible C++ stdlib — in-tree plugins satisfy this by construction.
 
-- On Linux the Itanium C++ ABI (vtable layout) is stable across gcc/clang, so C++ virtual calls
-  work across a `.so` boundary. **Constraint:** plugins are built against a compatible C++
-  standard library (same `libstdc++`/`libc++`). In-tree plugins satisfy this by construction;
-  the constraint is documented for out-of-tree ones. (If toolchain-independent third-party
-  binaries ever become a goal, a pure C ABI is the fallback — but that is not today's need.)
+```cpp
+extern "C" {
+uint32_t prfs_abi(void);                            // must equal prfs::plugin::ABI
+prfs::plugin::IPlugin* prfs_plugin_create(prfs::plugin::IHost*);
+void prfs_plugin_destroy(prfs::plugin::IPlugin*);   // matching deleter (same .so)
+}
+```
 
 ---
 
@@ -51,146 +62,144 @@ mismatch is refused with a clear log line.
 ```cpp
 namespace prfs::plugin {
 
-inline constexpr uint32_t ABI = 1;   // bump on ANY change to the interfaces below
+inline constexpr uint32_t ABI = 1;
 
-//  Services the host lends a plugin. Minimal and stable; grows only by ABI bump.
-class Host {
+//  Typed capability query: `auto* fe = query<IFrontend>(*plugin);`  (nullptr if absent)
+template <class I> I* query(class IPlugin& p);
+template <class I> I* resolve(class IHost& h);
+
+//  The DI container the host lends every plugin (and its own core services use).
+class IHost {
 public:
-    virtual ~Host() = default;
+    virtual ~IHost() = default;
 
-    virtual IPrfs& fs() = 0;                                   // the filesystem namespace
-    virtual size_t read(Node file, uint64_t off, char* out, size_t len) = 0;  // file bytes
-    virtual content::ContentConfig contentConfig() const = 0; // FS content policy (FSSTAT etc.)
-    virtual spdlog::logger& log() = 0;                        // shared structured logger
-    virtual std::string option(std::string_view key) const = 0; // plugin config (CLI/file)
+    //  core services
+    virtual IPrfs& fs() = 0;                                            // the filesystem
+    virtual size_t read(Node file, uint64_t off, char* out, size_t len) = 0; // file bytes
+    virtual spdlog::logger& log() = 0;                                 // shared logger
+    virtual std::string option(std::string_view key) const = 0;        // parsed CLI/config
+
+    //  dependency injection: fetch any service by interface ID (core or exported)
+    virtual void* resolve(std::string_view interfaceId) = 0;
 };
 
-//  A CLI option a plugin contributes. Kept library-agnostic (no CLI11 type in
-//  the ABI): the host registers these with its parser, namespaced by plugin.
-struct Option {
-    std::string name;   // "port"          → parsed as --<plugin>.<name>
-    std::string help;
-    std::string def;    // default value ("" if none)
-    bool flag = false;  // true ⇒ a boolean switch (no value)
-};
-
-//  A protocol front-end. Lifecycle: create → options → start → (serve…) → stop → destroy.
-class Plugin {
+//  A loaded plugin's root: identity + capability discovery.
+class IPlugin {
 public:
-    virtual ~Plugin() = default;
+    virtual ~IPlugin() = default;
 
-    virtual char const* name() const = 0;     // "nfsv3"
+    virtual char const* name() const = 0;                       // "nfsv3"
     virtual char const* version() const = 0;
-    virtual std::vector<Option> options() const { return {}; } // CLI args this plugin adds
-    virtual Error start() = 0;                 // bind / listen / register; OK or an error
-    virtual void stop() = 0;                   // graceful shutdown; join threads
+    virtual std::vector<std::string_view> interfaces() const = 0;   // exported interface IDs
+    virtual void* query(std::string_view interfaceId) = 0;          // → interface* or nullptr
+};
+
+// ── the exported interfaces (each with a stable, versioned ID) ──────────────
+
+struct Option { std::string name, help, def; bool flag = false; };   // a CLI arg
+
+//  A protocol front-end (nfsv3, mount, …).
+struct IFrontend {
+    static constexpr std::string_view ID = "prfs.frontend/1";
+    virtual ~IFrontend() = default;
+    virtual std::vector<Option> options() const { return {}; }   // CLI args it adds
+    virtual Error start() = 0;                                    // bind/listen; owns its threads
+    virtual void stop() = 0;
+};
+
+//  A counter-based random generator (the rng registry's plugin face).
+struct IRng {
+    static constexpr std::string_view ID = "prfs.rng/1";
+    virtual ~IRng() = default;
+    virtual char const* rngName() const = 0;
+    virtual void gen4(uint32_t const ctr[4], uint32_t const key[2], uint32_t out[4]) const = 0;
+};
+
+//  A storage engine behind IKvStore.
+struct IStorageEngine {
+    static constexpr std::string_view ID = "prfs.engine/1";
+    virtual ~IStorageEngine() = default;
+    virtual char const* engineName() const = 0;
+    virtual std::unique_ptr<IKvStore> open(std::string const& path, bool clean) = 0;
 };
 
 } // namespace prfs::plugin
-
-//  Every plugin .so exports these with C linkage (unmangled → dlsym-able):
-extern "C" {
-uint32_t prfs_plugin_abi(void);                          // must return prfs::plugin::ABI
-prfs::plugin::Plugin* prfs_plugin_create(prfs::plugin::Host*);
-void prfs_plugin_destroy(prfs::plugin::Plugin*);         // matching deleter (same .so)
-}
 ```
 
-- **`create`/`destroy` pair** so the plugin's `.so` owns its allocation — never `delete` an
-  object across a `.so` boundary.
-- **`Host` outlives the plugin** and is passed to `create`; the plugin must not retain it past
-  `destroy`.
-- **`Host::read` hides content vs literal:** the host resolves a `READ` — procedural bytes from
-  the content provider (config + `nodeID` seed) or a stored literal blob — so the plugin only
-  sees "give me bytes of this file".
+`query`/`resolve` are thin typed wrappers over the string-ID lookup:
+`return static_cast<I*>(p.query(I::ID));`. Type safety rests on the ID↔type contract — the whole
+point of versioning the ID.
 
 ---
 
-## 4. The loader
-
-Built-in **and** dynamic, both through the same `Plugin`/`Host` interface:
-
-- **Built-in:** a static registry (self-registration) for plugins compiled into the host —
-  e.g. a `null` front-end used in tests. No `dlopen`.
-- **Dynamic:** scan a plugin directory (from CLI/config), `dlopen` each candidate, `dlsym`
-  `prfs_plugin_abi` and check it equals `ABI` (else skip + log), then `prfs_plugin_create(host)`
-  and `start()`.
-
-Several plugins run at once (e.g. `nfsv3` + `mount`). The host owns their lifetimes; on shutdown
-it `stop()`s in reverse order, `prfs_plugin_destroy`s, then `dlclose`s. A failed `start()` is
-logged and that plugin is dropped without taking the host down.
-
-**Plugins contribute CLI args.** Because a plugin's options are only known once it is loaded, the
-flow is: discover → load → `create(host)` → collect each plugin's `options()` → register them
-with CLI11 (namespaced `--<plugin>.<name>`, e.g. `--nfsv3.port=2049`) → parse → `start()`. A
-plugin reads its parsed values back through `Host::option("port")`; the ABI stays
-CLI-library-agnostic (`Option` is a plain descriptor, no CLI11 type crosses the boundary).
-
-## 4a. The light tier — registries (rng, engines)
-
-Not every extension needs the full `Plugin` lifecycle. A **generator** or an **engine** is just a
-named factory, so those use a lighter mechanism: a **name-keyed registry** where each
-implementation **self-registers** (a `static Register` object; built-ins are kept alive with
-meson `link_whole`, and a dynamically-loaded `.so` registers the same way on load). `rng` is the
-first example (`prfs::rng::add/get/names`, one file per generator, no central switch — open/
-closed). Storage engines (`IKvStore`) could adopt the same registry later. The two tiers:
-
-- **Front-end plugins** — heavy: own a protocol, threads, sockets; `start()`/`stop()`; loaded by
-  the plugin host.
-- **Registries** — light: a name → factory table for generators/engines; self-registering,
-  statically linked or dlopen'd, no per-instance lifecycle.
-
----
-
-## 5. Threading
-
-The plugin API does not mandate a threading model: a front-end brings **its own** MT server
-(thread pool + event loop) — spun up in `start()`, joined in `stop()`. This is deliberate given
-the NFS analysis (naive `rpcgen` dispatch is single-threaded, todo L2): a plugin is free to run
-its own thread-pool TCP server, or wrap NFS-Ganesha, without the host imposing a loop.
-
-`Host` methods are callable from plugin threads: `IPrfs` is concurrency-safe by design (§8 —
-LMDB MVCC, single writer / many readers), the logger is thread-safe (spdlog), and `read` is a
-pure content lookup. Writes serialize at the single writer; reads scale — fine for a test target.
-
----
-
-## 6. Build & layout
+## 4. Discovery + wiring (the loader as DI container)
 
 ```
-include/prfs/plugin.hpp     the API (public header)
-src/host/                   the loader + main (CLI11 + spdlog)
-plugins/null/               built-in test front-end (also buildable as .so)
-plugins/nfsv3/  …           real front-ends (each its own meson subdir → <name>.so)
+load(path):
+    h = dlopen(path)
+    if dlsym(h,"prfs_abi")() != ABI: log+skip
+    plug = prfs_plugin_create(host)
+    for id in plug->interfaces():
+        switch id:
+          "prfs.frontend/1": fe = query<IFrontend>(*plug)
+                             register fe->options() with CLI11 as --<plug.name>.<opt>
+                             frontends.push_back(fe)            # start() after CLI parse
+          "prfs.rng/1":      r  = query<IRng>(*plug); rng::add(r->rngName(), bridge(r))
+          "prfs.engine/1":   e  = query<IStorageEngine>(*plug); engines.add(e)
+          else:              log "unknown interface {id}"       # forward-compatible: ignore
+    host.container.publish(plug)                                # its interfaces become resolvable
+```
+
+- **Order:** load all → collect front-end `options()` → parse CLI → `start()` front-ends. (A
+  plugin's options are only known once loaded, so CLI parsing follows discovery.)
+- **DI:** each exported interface is published into the container, so another component gets it
+  via `resolve<IRng>(host)` / `host.resolve("prfs.rng/1")` — no direct linkage between plugins.
+- **Forward-compatible:** an interface ID the host doesn't know is logged and ignored, not fatal.
+
+Built-in providers use the very same interfaces without `dlopen`: the LMDB/mem engines are
+`IStorageEngine`s, the rng generators are `IRng`s, all published into the container at startup.
+
+---
+
+## 5. Lifetime & threading
+
+- **Lifetime:** the host owns each `IPlugin` (`create`→`destroy`); exported interface pointers are
+  valid until `destroy`. No refcounting — the host is the single owner (simpler than COM).
+- **Threading:** an `IFrontend` brings its own MT server (own thread pool/event loop in `start()`,
+  joined in `stop()`) — deliberately, given the NFS analysis (naive `rpcgen` is single-threaded,
+  todo L2). `IHost` methods are callable from plugin threads: `IPrfs` is concurrency-safe (§8,
+  LMDB MVCC), the logger is thread-safe, `read` is a pure lookup.
+
+---
+
+## 6. Build, layout & testing
+
+```
+include/prfs/plugin.hpp     the interfaces + IDs + extern "C" ABI
+src/host/                   loader + container + main (CLI11 + spdlog)
+plugins/null/               a test plugin exporting IFrontend (+ a test IRng)
+plugins/nfsv3/  …           real front-ends → <name>.so
 ```
 
 - **meson:** `-Dplugins` option; the host links `libprfs` + content + rng + CLI11 + spdlog; each
-  plugin is a `shared_module`. Plugins added to the clang-format gate like everything else.
-- **spdlog + CLI11** are added as **git submodules** (matching how LMDB/Lua/sol2/Random123 are
-  vendored). Logging and CLI live in the host/plugins layer only — never in the leaf libraries.
+  plugin is a `shared_module`. **spdlog + CLI11** are git submodules (matching the vendoring
+  pattern). Logging/CLI live only in the host+plugin layer; leaf libraries stay free of them.
+- **Testing (test-first):** a `null` plugin that exports `IFrontend` whose `start()` runs a
+  scripted set of `IHost`/`IPrfs` ops and logs — proves discovery, `query`, the container, the
+  ABI check, and lifecycle end to end, built both **in-tree** (registry) and as a **.so** (dlopen).
+  Also a trivial `IRng` export to prove non-front-end interfaces wire through. Loader tests:
+  ABI-mismatch refused, unknown interface ignored, multiple plugins, isolated `start()` failure.
 
 ---
 
-## 7. Testing (test-first)
+## 7. Open questions
 
-- A **`null` front-end**: `start()` runs a scripted set of `Host`/`IPrfs` operations and logs,
-  then returns — no real network protocol. Proves host↔plugin wiring, the ABI check, the
-  create/start/stop/destroy lifecycle, and every `Host` service end to end. Built both **in-tree**
-  (registry path) and as a **`.so`** (dlopen path).
-- **Loader tests:** ABI-mismatch refused; missing/って bad symbol handled; multiple plugins
-  started/stopped in order; a failing `start()` is isolated.
-
----
-
-## 8. Open questions
-
-- **Filehandle ↔ node.** An NFS front-end must turn a filehandle `(nodeID, snapId)` back into a
-  `Node`. Today handles come only from traversal (`rwRoot`/`lookup`/`readdir`); L2 will want a
-  small store addition — `IPrfs::nodeById(id, snap)` — plus the T1/T4/T5 carve-outs (`..`
-  via-parent, cookie mapping, `.snapshot` listing). Captured here; belongs to L2.
-- **Shared executor.** Start with plugin-owned threads; a host-provided thread pool / event loop
-  is a later `Host` addition (ABI bump) if front-ends want to share one.
-- **Config surface.** CLI11 flags vs a config file vs both, and how per-plugin options are
-  namespaced (`--nfsv3.port=2049`). Decide with the host.
-- **Other extension points.** Storage engines (`IKvStore`) and content generators already have
-  clean interfaces and *could* become plugins under the same pattern — out of scope now.
+- **Filehandle ↔ node.** An NFS `IFrontend` must turn a filehandle `(nodeID, snapId)` back into a
+  `Node`; today handles come only from traversal, so L2 wants `IPrfs::nodeById(id, snap)` (plus
+  the T1/T4/T5 carve-outs: `..` via-parent, cookie mapping, `.snapshot` listing).
+- **Interface evolution.** Versioned IDs handle breaking changes; whether to also support
+  additive minor versions (a plugin exporting `prfs.frontend/1` on a `/2` host) is a policy to
+  settle — start strict (exact match).
+- **Interface catalogue.** Start with `IFrontend`, `IRng`, `IStorageEngine`; likely follow-ons:
+  content generator, auth, metrics. Each is just another ID.
+- **Config surface.** CLI11 flags vs config file vs both; per-plugin option namespacing.
