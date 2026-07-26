@@ -46,12 +46,15 @@ std::string exeDir() {
     return stdfs::path(buf).parent_path().string();
 }
 
-//  Load every *.so in `dir` as a plugin (sorted for a deterministic order).
-void loadDir(prfs::host::Loader& loader, spdlog::logger& log, std::string const& dir) {
+//  Load every *.so in `dir` as a plugin (sorted for a deterministic order),
+//  skipping any whose filename is in `skip`.
+void loadDir(prfs::host::Loader& loader, spdlog::logger& log, std::string const& dir,
+             std::vector<std::string> const& skip = {}) {
     std::error_code ec;
     std::vector<std::string> sos;
     for (auto const& e : stdfs::directory_iterator(dir, ec)) {
-        if (e.is_regular_file() && e.path().extension() == ".so") {
+        if (e.is_regular_file() && e.path().extension() == ".so" &&
+            std::find(skip.begin(), skip.end(), e.path().filename().string()) == skip.end()) {
             sos.push_back(e.path().string());
         }
     }
@@ -104,9 +107,10 @@ int main(int argc, char** argv) {
         for (std::string const& d : pluginDirs) {
             loadDir(loader, *log, d);
         }
-        //  Nothing named explicitly → discover plugins next to the executable.
+        //  Nothing named explicitly → discover plugins next to the executable,
+        //  minus null.so (the reference/test service, not a real front-end).
         if (plugins.empty() && pluginDirs.empty()) {
-            loadDir(loader, *log, exeDir());
+            loadDir(loader, *log, exeDir(), {"null.so"});
         }
         loader.startServices();
 
