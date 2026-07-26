@@ -19,15 +19,15 @@ the active rng. One wiring mechanism (the `di::Registry`) for built-ins and plug
   `reg.provide<IFrontend>(myServer)`, `reg.provide<IRng>(myGen, "fastrng")`. Built-ins do the
   same at startup; a plugin is just late registration after `dlopen`.
 - **The host resolves and acts** — `reg.resolveAll<IFrontend>()` → start each; the store opens via
-  `resolve<IStorageEngine>(storageFlavor)`; `content` uses `resolve<IRng>(rngFlavor)`. An interface
+  `resolve<IStorageEngine>(storageName)`; `content` uses `resolve<IRng>(rngName)`. An interface
   nobody provided simply isn't there (`requireAllResolved` reports it loudly at startup).
 - **DI, not bespoke discovery** — there is no plugin-specific `query`/`interfaces` protocol; the
-  registry *is* the discovery surface (`ids`/`flavors`/`resolveAll`, [`di.md`](di.md)).
+  registry *is* the discovery surface (`ids`/`names`/`resolveAll`, [`di.md`](di.md)).
 
 ```
 prfs host (executable)
   core     : IPrfs store · content · rng · logger (spdlog) · config (CLI11)
-  registry : di::Registry  —  (interface-id, flavor) → provider   (built-ins + plugins)
+  registry : di::Registry  —  (interface-id, name) → provider   (built-ins + plugins)
   loader   : dlopen → abi-check → register(host) → resolveAll<IFrontend> → start
       │
       ├── plugins/nfsv3.so   provides IFrontend "nfsv3"
@@ -92,7 +92,7 @@ public:
 
 struct Option { std::string name, help, def; bool flag = false; };   // a CLI arg
 
-//  A protocol front-end (nfsv3, mount, …). Flavor = the protocol name.
+//  A protocol front-end. The di name is the protocol, e.g. "nfsv3" / "mount".
 struct IFrontend {
     static constexpr std::string_view ID = "prfs.frontend/1";
     virtual ~IFrontend() = default;
@@ -101,14 +101,14 @@ struct IFrontend {
     virtual void stop() = 0;
 };
 
-//  A counter-based random generator. Flavor = the generator name (rng, di.md §9).
+//  A counter-based random generator. The di name is the generator, e.g. "philox" (di.md §9).
 struct IRng {
     static constexpr std::string_view ID = "prfs.rng/1";
     virtual ~IRng() = default;
     virtual void gen4(uint32_t const ctr[4], uint32_t const key[2], uint32_t out[4]) const = 0;
 };
 
-//  A storage engine behind IKvStore. Flavor = the engine name ("lmdb"/"memory").
+//  A storage engine behind IKvStore. The di name is the engine, "lmdb" / "memory".
 struct IStorageEngine {
     static constexpr std::string_view ID = "prfs.engine/1";
     virtual ~IStorageEngine() = default;
@@ -118,7 +118,7 @@ struct IStorageEngine {
 } // namespace prfs::plugin
 ```
 
-The variant of each interface (which protocol / generator / engine) is the **`di` flavor**, so a
+The variant of each interface (which protocol / generator / engine) is the **`di` name**, so a
 plugin providing two rng generators just `provide<IRng>(a,"x")` / `provide<IRng>(b,"y")`.
 
 ---
@@ -134,7 +134,7 @@ load(path):
 
 after all loaded:
     for fe in reg.resolveAll<IFrontend>():    # built-in + plugin front-ends, uniformly
-        register fe->options() with CLI11 as --<flavor>.<opt>
+        register fe->options() with CLI11 as --<name>.<opt>
     parse CLI
     reg.requireAllResolved()                  # fail loud: any declared dep still missing
     for fe in reg.resolveAll<IFrontend>(): fe->start()
@@ -142,17 +142,17 @@ after all loaded:
 
 - **No bespoke discovery** — a plugin simply `provide`s; the registry is the discovery surface.
   `resolveAll<IFrontend>()` yields built-in and plugin front-ends the same way; the store opens
-  via `resolve<IStorageEngine>(storageFlavor)`; `content` uses `resolve<IRng>(rngFlavor)`.
+  via `resolve<IStorageEngine>(storageName)`; `content` uses `resolve<IRng>(rngName)`.
 - **Order** — load all → collect `options()` → parse CLI → `requireAllResolved()` → `start()`.
   (A plugin's options are only known once it has registered, so CLI parse follows loading.)
 - **Fail loud, not silent** — a missing dependency surfaces at `requireAllResolved()` with its
-  `(id, flavor)`, and `resolve()` throws rather than returning null (di.md §3).
+  `(id, name)`, and `resolve()` throws rather than returning null (di.md §3).
 - **Lifetime** — the host owns each `IPlugin`; on shutdown it `stop()`s front-ends, then
   `prfs_plugin_destroy` (which `withdraw`s the plugin's providers so no dangling entry survives
   `dlclose`).
 
 Built-in providers use the very same registry without `dlopen`: the LMDB/mem engines register as
-`IStorageEngine` flavors, the rng generators as `IRng` flavors, at startup.
+`IStorageEngine` names, the rng generators as `IRng` names, at startup.
 
 ---
 
@@ -185,7 +185,7 @@ plugins/nfsv3/  …           real front-ends → <name>.so
   scripted set of `IHost`/`IPrfs` ops and logs — proves `provide`/`resolveAll`, the ABI check, and
   the lifecycle end to end, built both **in-tree** (direct `provide`) and as a **.so** (dlopen).
   Also a trivial `IRng` provider to prove non-front-end interfaces wire through. Registry-level
-  behaviour (round-trip, flavors, `requireAllResolved`, isolation) is tested in `di` (di.md §10).
+  behaviour (round-trip, names, `requireAllResolved`, isolation) is tested in `di` (di.md §10).
   Loader tests: ABI-mismatch refused, multiple plugins, isolated `start()` failure, clean
   `withdraw` on unload.
 
