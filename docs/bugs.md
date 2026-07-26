@@ -42,6 +42,13 @@ TODO in `todo.md`. Status is **open** until resolved in the design or the code.
 
 ## Resolved
 
+- **B9 — `stats().links` undercounted orphan-dir entries (backend).** The LMDB/mem PrfsStore
+  computed `links` by summing down-link sets only over dirs with `nlink>0`, dropping entries
+  held inside directories that had been unlinked from the tree (but still exist and still
+  contain children). Design §9 defines `links` as `±1` per link/unlink with no reachability
+  condition (matching the reference oracle). Fixed in `src/core/prfs.cpp`: count down-links
+  over *all* dirs with a live record (`eachEffNode`, no `nlink` filter); node counts keep the
+  `nlink>0` liveness filter inline. Caught by the differential harness (`tests/test_diff.cpp`).
 - **B2 — `diff` / `changes` semantics** — specified in design §6.1: `diff(A,B)` is a
   node-level state-comparison oracle `diffNodes(A,B)` (CREATED/REMOVED/MODIFIED{content,attrs}) over a
   `changes` candidate index, plus on-demand path-level `diffPaths`. Implementation tracked in

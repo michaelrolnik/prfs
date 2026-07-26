@@ -10,3 +10,11 @@ test_store = executable(
 )
 
 test('store', test_store)
+
+test_diff = executable(
+    'test_diff',
+    'test_diff.cpp',
+    dependencies : [prfs_ref_dep, prfs_dep, gtest_dep],
+)
+
+test('diff', test_diff, timeout : 120)

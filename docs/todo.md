@@ -35,7 +35,7 @@ Living task list. `T*` items fix the correspondingly-numbered risks in `bugs.md`
 - ✅ Storage backend **build-config** (`-Dstorage=lmdb|memory`) via the `openPrfs` seam.
 - ✅ **Storage-backend interface** (`IKvStore`/`IKvTxn`/`IKvCursor`): one `PrfsStore` (all FS logic, design §5/§6) over swappable engines.
 - ✅ Vendor LMDB as a git submodule (`third_party/lmdb`) + **`LmdbKv`** and **`MemKv`** engines — contract tests green against both via `INSTANTIATE_TEST_SUITE_P` (oracle + backend).
-- [ ] **Differential harness**: randomized op sequences, assert PrfsStore backend ≡ oracle at every snapshot.
+- ✅ **Differential harness** (`tests/test_diff.cpp`): pseudo-random op sequences driven into oracle + backend in lockstep; canonical reachable-graph serialization, error codes, snapshot ids and global stats cross-checked every step; every snapshot view re-verified at the end. 8 seeds × 1500 ops. Caught the `stats().links` orphan-dir undercount (bugs.md B9).
 - [ ] Extend tests: invariant/property, determinism, crash-safety.
 - [ ] `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12).
 - [ ] Statistics (§9), incl. the `FSSTAT`/`FSINFO` mapping.

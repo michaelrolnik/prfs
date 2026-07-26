@@ -76,6 +76,7 @@ fmt_files = files(
     'src/storage/memory/kv.cpp',
     'src/storage/lmdb/kv.cpp',
     'tests/test_store.cpp',
+    'tests/test_diff.cpp',
 )
 if clang_format.found()
     run_target('format', command : [clang_format, '-i'] + fmt_files)

@@ -9,6 +9,7 @@ AccessModifierOffset: -4
 NamespaceIndentation: None
 FixNamespaceComments: true
 SeparateDefinitionBlocks: Always
+InsertBraces: true
 
 PointerAlignment:   Left
 ReferenceAlignment: Left

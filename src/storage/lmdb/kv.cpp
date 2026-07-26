@@ -86,22 +86,25 @@ public:
     }
 
     ~LmdbTxn() override {
-        if (!m_done)
+        if (!m_done) {
             mdb_txn_abort(m_txn);
+        }
     }
 
     bool get(Kv k, std::string_view key, std::string& out) override {
         MDB_val kk = mval(key), vv;
-        if (mdb_get(m_txn, db(k), &kk, &vv))
+        if (mdb_get(m_txn, db(k), &kk, &vv)) {
             return false;
+        }
         out.assign(static_cast<char const*>(vv.mv_data), vv.mv_size);
         return true;
     }
 
     void put(Kv k, std::string_view key, std::string_view v) override {
         MDB_val kk = mval(key), vv = mval(v);
-        if (int rc = mdb_put(m_txn, db(k), &kk, &vv, 0))
+        if (int rc = mdb_put(m_txn, db(k), &kk, &vv, 0)) {
             throw std::runtime_error(std::string("lmdb put: ") + mdb_strerror(rc));
+        }
     }
 
     void del(Kv k, std::string_view key) override {
@@ -134,20 +137,23 @@ private:
 class LmdbKv : public IKvStore {
 public:
     LmdbKv(std::string const& path, bool clean) {
-        if (clean)
+        if (clean) {
             std::filesystem::remove_all(path);
+        }
         std::filesystem::create_directories(path);
 
         mdb_env_create(&m_env);
         mdb_env_set_maxdbs(m_env, size_t(Kv::COUNT_));
         mdb_env_set_mapsize(m_env, size_t(1) << 30);
-        if (int rc = mdb_env_open(m_env, path.c_str(), 0, 0664))
+        if (int rc = mdb_env_open(m_env, path.c_str(), 0, 0664)) {
             throw std::runtime_error(std::string("lmdb open: ") + mdb_strerror(rc));
+        }
 
         MDB_txn* t;
         mdb_txn_begin(m_env, nullptr, 0, &t);
-        for (size_t i = 0; i < size_t(Kv::COUNT_); ++i)
+        for (size_t i = 0; i < size_t(Kv::COUNT_); ++i) {
             mdb_dbi_open(t, kvName(Kv(i)), MDB_CREATE, &m_dbi[i]);
+        }
         mdb_txn_commit(t);
     }
 

@@ -36,8 +36,9 @@ uint64_t rdbe(char const* p) {
     auto b = reinterpret_cast<unsigned char const*>(p);
     uint64_t x = 0;
 
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < 8; ++i) {
         x = (x << 8) | b[i];
+    }
     return x;
 }
 
@@ -177,8 +178,9 @@ public:
     std::vector<SnapId> snapshots() const override {
         std::vector<SnapId> out;
 
-        for (SnapId s = 1; s < m_cur; ++s)
+        for (SnapId s = 1; s < m_cur; ++s) {
             out.push_back(s);
+        }
         return out;
     }
 
@@ -200,12 +202,14 @@ public:
         auto r = m_kv->begin(false);
         NodeRec dr;
 
-        if (!loadNode(r.get(), dir->id(), rr(dir->snap()), dr))
+        if (!loadNode(r.get(), dir->id(), rr(dir->snap()), dr)) {
             return nullptr;
+        }
 
         std::string child;
-        if (!r->get(Kv::DownLinks, be(dir->id()) + be(dr.dnLinkVer) + name, child))
+        if (!r->get(Kv::DownLinks, be(dir->id()) + be(dr.dnLinkVer) + name, child)) {
             return nullptr;
+        }
         return handle(rdbe(child.data()), dir->snap());
     }
 
@@ -213,8 +217,9 @@ public:
         auto w = m_kv->begin(true);
         Error e = linkT(w.get(), dir->id(), name, child->id());
 
-        if (e == Error::OK)
+        if (e == Error::OK) {
             w->commit();
+        }
         return e;
     }
 
@@ -222,8 +227,9 @@ public:
         auto w = m_kv->begin(true);
         Error e = unlinkT(w.get(), dir->id(), name);
 
-        if (e == Error::OK)
+        if (e == Error::OK) {
             w->commit();
+        }
         return e;
     }
 
@@ -231,19 +237,23 @@ public:
         auto w = m_kv->begin(true);
         NodeRec sr;
 
-        if (!loadNode(w.get(), sdir->id(), m_cur, sr))
+        if (!loadNode(w.get(), sdir->id(), m_cur, sr)) {
             return Error::NOENT;
+        }
 
         std::string child;
-        if (!w->get(Kv::DownLinks, be(sdir->id()) + be(sr.dnLinkVer) + sn, child))
+        if (!w->get(Kv::DownLinks, be(sdir->id()) + be(sr.dnLinkVer) + sn, child)) {
             return Error::NOENT;
+        }
 
         Error e = linkT(w.get(), ddir->id(), dn, rdbe(child.data()));
-        if (e != Error::OK)
+        if (e != Error::OK) {
             return e;
+        }
         e = unlinkT(w.get(), sdir->id(), sn);
-        if (e != Error::OK)
+        if (e != Error::OK) {
             return e;
+        }
         w->commit();
         return Error::OK;
     }
@@ -256,10 +266,12 @@ public:
         auto w = m_kv->begin(true);
         NodeRec r;
 
-        if (!loadNode(w.get(), dev->id(), m_cur, r))
+        if (!loadNode(w.get(), dev->id(), m_cur, r)) {
             return Error::NOENT;
-        if (r.type != uint32_t(Type::BLK) && r.type != uint32_t(Type::CHR))
+        }
+        if (r.type != uint32_t(Type::BLK) && r.type != uint32_t(Type::CHR)) {
             return Error::INVAL;
+        }
         r.spec = (uint64_t(maj) << 32) | min;
         storeNode(w.get(), dev->id(), m_cur, r);
         w->commit();
@@ -271,8 +283,9 @@ public:
         auto r = m_kv->begin(false);
         NodeRec dr;
 
-        if (!loadNode(r.get(), dir->id(), rr(dir->snap()), dr))
+        if (!loadNode(r.get(), dir->id(), rr(dir->snap()), dr)) {
             return out;
+        }
         scanDownlinks(r.get(), dir->id(), dr.dnLinkVer, [&](std::string const& n, uint64_t c) {
             out.push_back({n, handle(c, dir->snap())});
         });
@@ -285,18 +298,21 @@ public:
         auto r = m_kv->begin(false);
         NodeRec nr;
 
-        if (!loadNode(r.get(), node->id(), rr(node->snap()), nr))
+        if (!loadNode(r.get(), node->id(), rr(node->snap()), nr)) {
             return out;
+        }
 
         std::string pfx = be(node->id()) + be(nr.upLinkVer);
         auto c = r->cursor(Kv::UpLinks);
         for (bool ok = c->seek(pfx); ok; ok = c->next()) {
             auto k = c->key();
-            if (k.size() < 16 || memcmp(k.data(), pfx.data(), 16) != 0)
+            if (k.size() < 16 || memcmp(k.data(), pfx.data(), 16) != 0) {
                 break;
+            }
             uint64_t container = rdbe(k.data() + 16);
-            if (seen.insert(container).second)
+            if (seen.insert(container).second) {
                 out.push_back(handle(container, node->snap()));
+            }
         }
         return out;
     }
@@ -323,8 +339,9 @@ public:
             bool eA = loadNode(r.get(), id, ra, va) && va.nlink > 0;
             bool eB = loadNode(r.get(), id, rb, vb) && vb.nlink > 0;
 
-            if (!eA && !eB)
+            if (!eA && !eB) {
                 continue;
+            }
             if (!eA && eB) {
                 out.push_back({id, NodeChange::CREATED});
                 continue;
@@ -336,10 +353,11 @@ public:
             bool content = va.blob != vb.blob || va.spec != vb.spec || va.size != vb.size;
             bool attrs =
                 va.mode != vb.mode || va.uid != vb.uid || va.gid != vb.gid || va.mtime != vb.mtime;
-            if (content)
+            if (content) {
                 out.push_back({id, NodeChange::MODIFIED_CONTENT});
-            else if (attrs)
+            } else if (attrs) {
                 out.push_back({id, NodeChange::MODIFIED_ATTRS});
+            }
         }
         return out;
     }
@@ -356,12 +374,16 @@ public:
             linkSet(r.get(), dir, ra, sa);
             linkSet(r.get(), dir, rb, sb);
 
-            for (auto const& [name, child] : sb)
-                if (!sa.count(name))
+            for (auto const& [name, child] : sb) {
+                if (!sa.count(name)) {
                     out.push_back({PathChange::ADDED, dir, name, child});
-            for (auto const& [name, child] : sa)
-                if (!sb.count(name))
+                }
+            }
+            for (auto const& [name, child] : sa) {
+                if (!sb.count(name)) {
                     out.push_back({PathChange::REMOVED, dir, name, child});
+                }
+            }
         }
         return out;
     }
@@ -371,16 +393,23 @@ public:
         Stats s;
         auto r = m_kv->begin(false);
 
-        eachLiveNode(r.get(), rg, [&](uint64_t, NodeRec const& n) {
+        // node counts: only nodes with an incoming link are "alive" (design §9)
+        eachEffNode(r.get(), rg, [&](uint64_t, NodeRec const& n) {
+            if (n.nlink == 0) {
+                return;
+            }
             s.nodes[n.type]++;
-            if (n.type == uint32_t(Type::REG))
+            if (n.type == uint32_t(Type::REG)) {
                 s.totalSize += n.size;
+            }
         });
-        // live links: sum of live down-link sets over live dirs
-        eachLiveNode(r.get(), rg, [&](uint64_t id, NodeRec const& n) {
-            if (n.type == uint32_t(Type::DIR))
+        // live links: every live down-link counts (links±1 per link/unlink,
+        // design §9) — including entries inside now-orphaned dirs (nlink==0).
+        eachEffNode(r.get(), rg, [&](uint64_t id, NodeRec const& n) {
+            if (n.type == uint32_t(Type::DIR)) {
                 scanDownlinks(r.get(), id, n.dnLinkVer,
                               [&](std::string const&, uint64_t) { s.links++; });
+            }
         });
         return s;
     }
@@ -393,8 +422,9 @@ private:
 
     bool getMeta(IKvTxn* t, char const* key, uint64_t& out) const {
         std::string v;
-        if (!t->get(Kv::Meta, key, v))
+        if (!t->get(Kv::Meta, key, v)) {
             return false;
+        }
         memcpy(&out, v.data(), 8);
         return true;
     }
@@ -410,8 +440,9 @@ private:
 
         if (pos) {
             auto k = c->key();
-            if (!(k.size() == 16 && rdbe(k.data()) == id && rdbe(k.data() + 8) == rg))
+            if (!(k.size() == 16 && rdbe(k.data()) == id && rdbe(k.data() + 8) == rg)) {
                 pos = c->prev();
+            }
         } else {
             pos = c->last();
         }
@@ -455,8 +486,9 @@ private:
 
         for (bool ok = c->seek(pfx); ok; ok = c->next()) {
             auto k = c->key();
-            if (k.size() < 16 || memcmp(k.data(), pfx.data(), 16) != 0)
+            if (k.size() < 16 || memcmp(k.data(), pfx.data(), 16) != 0) {
                 break;
+            }
             std::string name(k.data() + 16, k.size() - 16);
             fn(name, rdbe(c->val().data()));
         }
@@ -464,19 +496,23 @@ private:
 
     void linkSet(IKvTxn* t, uint64_t dir, SnapId rg, std::map<std::string, uint64_t>& out) const {
         NodeRec dr;
-        if (!loadNode(t, dir, rg, dr) || dr.type != uint32_t(Type::DIR))
+        if (!loadNode(t, dir, rg, dr) || dr.type != uint32_t(Type::DIR)) {
             return;
+        }
         scanDownlinks(t, dir, dr.dnLinkVer, [&](std::string const& n, uint64_t c) { out[n] = c; });
     }
 
-    template <class F> void eachLiveNode(IKvTxn* t, SnapId rg, F fn) const {
+    // Yields each node's effective record at rg (the newest version ≤ rg),
+    // regardless of nlink. Callers filter for liveness as needed.
+    template <class F> void eachEffNode(IKvTxn* t, SnapId rg, F fn) const {
         auto c = t->cursor(Kv::Nodes);
         uint64_t curId = 0;
         bool have = false;
         NodeRec chosen;
         auto finish = [&]() {
-            if (have && chosen.nlink > 0)
+            if (have) {
                 fn(curId, chosen);
+            }
         };
         for (bool ok = c->first(); ok; ok = c->next()) {
             auto k = c->key();
@@ -502,8 +538,9 @@ private:
         for (bool ok = c->seek(lo); ok; ok = c->next()) {
             auto k = c->key();
             uint64_t snap = rdbe(k.data());
-            if (snap > rb)
+            if (snap > rb) {
                 break;
+            }
             out.insert(rdbe(k.data() + 8));
         }
     }
@@ -511,14 +548,16 @@ private:
     uint64_t ensureWritableDnLinks(IKvTxn* t, uint64_t dir) {
         NodeRec r;
         loadNode(t, dir, m_cur, r);
-        if (r.dnLinkVer == m_cur)
+        if (r.dnLinkVer == m_cur) {
             return m_cur;
+        }
 
         std::vector<std::pair<std::string, uint64_t>> copies;
         scanDownlinks(t, dir, r.dnLinkVer,
                       [&](std::string const& n, uint64_t c) { copies.push_back({n, c}); });
-        for (auto const& [name, child] : copies)
+        for (auto const& [name, child] : copies) {
             t->put(Kv::DownLinks, be(dir) + be(m_cur) + name, be(child));
+        }
 
         r.dnLinkVer = m_cur;
         storeNode(t, dir, m_cur, r);
@@ -528,20 +567,23 @@ private:
     uint64_t ensureWritableUpLinks(IKvTxn* t, uint64_t node) {
         NodeRec r;
         loadNode(t, node, m_cur, r);
-        if (r.upLinkVer == m_cur)
+        if (r.upLinkVer == m_cur) {
             return m_cur;
+        }
 
         std::vector<std::string> copies; // suffix = container(8) ‖ name
         std::string pfx = be(node) + be(r.upLinkVer);
         auto c = t->cursor(Kv::UpLinks);
         for (bool ok = c->seek(pfx); ok; ok = c->next()) {
             auto k = c->key();
-            if (k.size() < 16 || memcmp(k.data(), pfx.data(), 16) != 0)
+            if (k.size() < 16 || memcmp(k.data(), pfx.data(), 16) != 0) {
                 break;
+            }
             copies.emplace_back(k.data() + 16, k.size() - 16);
         }
-        for (auto const& suffix : copies)
+        for (auto const& suffix : copies) {
             t->put(Kv::UpLinks, be(node) + be(m_cur) + suffix, std::string_view());
+        }
 
         r.upLinkVer = m_cur;
         storeNode(t, node, m_cur, r);
@@ -555,17 +597,21 @@ private:
         while (!st.empty()) {
             uint64_t n = st.back();
             st.pop_back();
-            if (n == to)
+            if (n == to) {
                 return true;
-            if (!seen.insert(n).second)
+            }
+            if (!seen.insert(n).second) {
                 continue;
+            }
             NodeRec r;
-            if (!loadNode(t, n, m_cur, r) || r.type != uint32_t(Type::DIR))
+            if (!loadNode(t, n, m_cur, r) || r.type != uint32_t(Type::DIR)) {
                 continue;
+            }
             scanDownlinks(t, n, r.dnLinkVer, [&](std::string const&, uint64_t child) {
                 NodeRec cr;
-                if (loadNode(t, child, m_cur, cr) && cr.type == uint32_t(Type::DIR))
+                if (loadNode(t, child, m_cur, cr) && cr.type == uint32_t(Type::DIR)) {
                     st.push_back(child);
+                }
             });
         }
         return false;
@@ -573,18 +619,23 @@ private:
 
     Error linkT(IKvTxn* t, uint64_t dir, std::string const& name, uint64_t child) {
         NodeRec dr, cr;
-        if (!loadNode(t, dir, m_cur, dr))
+        if (!loadNode(t, dir, m_cur, dr)) {
             return Error::NOENT;
-        if (dr.type != uint32_t(Type::DIR))
+        }
+        if (dr.type != uint32_t(Type::DIR)) {
             return Error::NOTDIR;
-        if (!loadNode(t, child, m_cur, cr))
+        }
+        if (!loadNode(t, child, m_cur, cr)) {
             return Error::NOENT;
-        if (cr.type == uint32_t(Type::DIR) && reachable(t, child, dir))
+        }
+        if (cr.type == uint32_t(Type::DIR) && reachable(t, child, dir)) {
             return Error::INVAL;
+        }
 
         std::string tmp;
-        if (t->get(Kv::DownLinks, be(dir) + be(dr.dnLinkVer) + name, tmp))
+        if (t->get(Kv::DownLinks, be(dir) + be(dr.dnLinkVer) + name, tmp)) {
             return Error::EXIST;
+        }
 
         uint64_t dv = ensureWritableDnLinks(t, dir);
         uint64_t uv = ensureWritableUpLinks(t, child);
@@ -599,12 +650,14 @@ private:
 
     Error unlinkT(IKvTxn* t, uint64_t dir, std::string const& name) {
         NodeRec dr;
-        if (!loadNode(t, dir, m_cur, dr))
+        if (!loadNode(t, dir, m_cur, dr)) {
             return Error::NOENT;
+        }
 
         std::string child;
-        if (!t->get(Kv::DownLinks, be(dir) + be(dr.dnLinkVer) + name, child))
+        if (!t->get(Kv::DownLinks, be(dir) + be(dr.dnLinkVer) + name, child)) {
             return Error::NOENT;
+        }
         uint64_t cid = rdbe(child.data());
 
         uint64_t dv = ensureWritableDnLinks(t, dir);
@@ -614,8 +667,9 @@ private:
 
         NodeRec cr;
         loadNode(t, cid, m_cur, cr);
-        if (cr.nlink)
+        if (cr.nlink) {
             cr.nlink--;
+        }
         storeNode(t, cid, m_cur, cr);
         return Error::OK;
     }
@@ -623,10 +677,12 @@ private:
     Error setBlob(Node n, Type want, std::string const& blob) {
         auto w = m_kv->begin(true);
         NodeRec r;
-        if (!loadNode(w.get(), n->id(), m_cur, r))
+        if (!loadNode(w.get(), n->id(), m_cur, r)) {
             return Error::NOENT;
-        if (r.type != uint32_t(want))
+        }
+        if (r.type != uint32_t(want)) {
             return Error::INVAL;
+        }
         r.blob = blob;
         storeNode(w.get(), n->id(), m_cur, r);
         w->commit();
@@ -644,8 +700,9 @@ private:
     void mutateNode(uint64_t id, std::function<void(NodeRec&)> fn) {
         auto w = m_kv->begin(true);
         NodeRec r;
-        if (!loadNode(w.get(), id, m_cur, r))
+        if (!loadNode(w.get(), id, m_cur, r)) {
             return;
+        }
         fn(r);
         storeNode(w.get(), id, m_cur, r);
         w->commit();

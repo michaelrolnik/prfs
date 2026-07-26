@@ -134,10 +134,12 @@ TEST_P(StoreTest, DiffNodes) {
 
     bool aMod = false, bNew = false;
     for (auto const& nd : fs->diffNodes(s1, s2)) {
-        if (nd.id == a->id())
+        if (nd.id == a->id()) {
             aMod = nd.change == NodeChange::MODIFIED_CONTENT;
-        if (nd.id == b->id())
+        }
+        if (nd.id == b->id()) {
             bNew = nd.change == NodeChange::CREATED;
+        }
     }
     EXPECT_TRUE(aMod);
     EXPECT_TRUE(bNew);
@@ -154,10 +156,12 @@ TEST_P(StoreTest, DiffPaths) {
 
     bool addB = false, remA = false;
     for (auto const& p : fs->diffPaths(s1, s2)) {
-        if (p.name == "b" && p.change == PathChange::ADDED)
+        if (p.name == "b" && p.change == PathChange::ADDED) {
             addB = true;
-        if (p.name == "a" && p.change == PathChange::REMOVED)
+        }
+        if (p.name == "a" && p.change == PathChange::REMOVED) {
             remA = true;
+        }
     }
     EXPECT_TRUE(addB);
     EXPECT_TRUE(remA);

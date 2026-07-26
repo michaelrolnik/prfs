@@ -110,8 +110,9 @@ public:
 
     std::vector<SnapId> snapshots() const override {
         std::vector<SnapId> v;
-        for (SnapId s = 1; s < m_cur; ++s)
+        for (SnapId s = 1; s < m_cur; ++s) {
             v.push_back(s);
+        }
         return v;
     }
 
@@ -132,20 +133,24 @@ public:
     Node lookup(Node dir, std::string const& name) override {
         uint64_t child;
 
-        if (linkLiveAt({dir->id(), name}, dir->snap(), child))
+        if (linkLiveAt({dir->id(), name}, dir->snap(), child)) {
             return handle(child, dir->snap());
+        }
         return nullptr;
     }
 
     Error link(Node dir, std::string const& name, Node child) override {
-        if (dir->type() != Type::DIR)
+        if (dir->type() != Type::DIR) {
             return Error::NOTDIR;
-        if (child->type() == Type::DIR && reachable(child->id(), dir->id()))
+        }
+        if (child->type() == Type::DIR && reachable(child->id(), dir->id())) {
             return Error::INVAL; // §2.2 cycle prevention
+        }
         uint64_t dummy;
 
-        if (linkLiveAt({dir->id(), name}, LATEST, dummy))
+        if (linkLiveAt({dir->id(), name}, LATEST, dummy)) {
             return Error::EXIST;
+        }
 
         m_links[{dir->id(), name}].push_back({m_cur, 0, child->id()});
         m_names[dir->id()].insert(name);
@@ -157,18 +162,21 @@ public:
 
     Error unlink(Node dir, std::string const& name) override {
         auto it = m_links.find({dir->id(), name});
-        if (it == m_links.end())
+        if (it == m_links.end()) {
             return Error::NOENT;
+        }
         LinkIv* iv = liveIv(it->second, m_cur);
-        if (!iv)
+        if (!iv) {
             return Error::NOENT;
+        }
 
         uint64_t child = iv->child;
 
-        if (iv->born == m_cur)
+        if (iv->born == m_cur) {
             it->second.erase(it->second.begin() + (iv - it->second.data()));
-        else
+        } else {
             iv->dead = m_cur;
+        }
         liveVer(child).a.nlink--;
         touch(dir->id());
         touch(child);
@@ -178,33 +186,38 @@ public:
     Error move(Node sdir, std::string const& sn, Node ddir, std::string const& dn) override {
         uint64_t child;
 
-        if (!linkLiveAt({sdir->id(), sn}, LATEST, child))
+        if (!linkLiveAt({sdir->id(), sn}, LATEST, child)) {
             return Error::NOENT;
+        }
         Error e = link(ddir, dn, handle(child, LATEST)); // cycle + EXIST checks
-        if (e != Error::OK)
+        if (e != Error::OK) {
             return e;
+        }
         return unlink(sdir, sn);
     }
 
     Error setContent(Node reg, std::string const& c) override {
-        if (reg->type() != Type::REG)
+        if (reg->type() != Type::REG) {
             return Error::INVAL;
+        }
         liveVer(reg->id()).blob = c;
         touch(reg->id());
         return Error::OK;
     }
 
     Error setTarget(Node lnk, std::string const& t) override {
-        if (lnk->type() != Type::LNK)
+        if (lnk->type() != Type::LNK) {
             return Error::INVAL;
+        }
         liveVer(lnk->id()).blob = t;
         touch(lnk->id());
         return Error::OK;
     }
 
     Error setRdev(Node dev, uint32_t maj, uint32_t min) override {
-        if (dev->type() != Type::BLK && dev->type() != Type::CHR)
+        if (dev->type() != Type::BLK && dev->type() != Type::CHR) {
             return Error::INVAL;
+        }
         liveVer(dev->id()).a.spec = (uint64_t(maj) << 32) | min;
         touch(dev->id());
         return Error::OK;
@@ -214,12 +227,14 @@ public:
         std::vector<std::pair<std::string, Node>> out;
         auto ni = m_names.find(dir->id());
 
-        if (ni == m_names.end())
+        if (ni == m_names.end()) {
             return out;
+        }
         for (auto const& name : ni->second) {
             uint64_t child;
-            if (linkLiveAt({dir->id(), name}, dir->snap(), child))
+            if (linkLiveAt({dir->id(), name}, dir->snap(), child)) {
                 out.push_back({name, handle(child, dir->snap())});
+            }
         }
         return out;
     }
@@ -231,8 +246,9 @@ public:
         for (auto const& [key, ivs] : m_links) {
             for (auto const& iv : ivs) {
                 if (iv.child == node->id() && liveAt(iv, resolve(node->snap())) &&
-                    seen.insert(key.first).second)
+                    seen.insert(key.first).second) {
                     out.push_back(handle(key.first, node->snap()));
+                }
             }
         }
         return out;
@@ -248,9 +264,11 @@ public:
         SnapId ra = resolve(a), rb = resolve(b);
         std::set<uint64_t> cand;
 
-        for (auto const& [s, ids] : m_changes)
-            if (s > ra && s <= rb)
+        for (auto const& [s, ids] : m_changes) {
+            if (s > ra && s <= rb) {
                 cand.insert(ids.begin(), ids.end());
+            }
+        }
 
         std::vector<NodeDiff> out;
         for (uint64_t id : cand) {
@@ -258,8 +276,9 @@ public:
             NodeVer const* vb = effR(id, rb);
             bool eA = va && va->a.nlink > 0;
             bool eB = vb && vb->a.nlink > 0;
-            if (!eA && !eB)
+            if (!eA && !eB) {
                 continue;
+            }
             if (!eA && eB) {
                 out.push_back({id, NodeChange::CREATED});
                 continue;
@@ -272,10 +291,11 @@ public:
                 va->blob != vb->blob || va->a.spec != vb->a.spec || va->a.size != vb->a.size;
             bool attrs = va->a.mode != vb->a.mode || va->a.uid != vb->a.uid ||
                          va->a.gid != vb->a.gid || va->a.mtime != vb->a.mtime;
-            if (content)
+            if (content) {
                 out.push_back({id, NodeChange::MODIFIED_CONTENT});
-            else if (attrs)
+            } else if (attrs) {
                 out.push_back({id, NodeChange::MODIFIED_ATTRS});
+            }
         }
         return out; // already ordered by id (from set)
     }
@@ -287,11 +307,11 @@ public:
         for (auto const& [key, ivs] : m_links) {
             uint64_t ca, cb;
             bool la = liveAtR(ivs, ra, ca), lb = liveAtR(ivs, rb, cb);
-            if (!la && lb)
+            if (!la && lb) {
                 out.push_back({PathChange::ADDED, key.first, key.second, cb});
-            else if (la && !lb)
+            } else if (la && !lb) {
                 out.push_back({PathChange::REMOVED, key.first, key.second, ca});
-            else if (la && lb && ca != cb) {
+            } else if (la && lb && ca != cb) {
                 out.push_back({PathChange::REMOVED, key.first, key.second, ca});
                 out.push_back({PathChange::ADDED, key.first, key.second, cb});
             }
@@ -307,14 +327,18 @@ public:
             NodeVer const* v = effR(id, rg);
             if (v && v->a.nlink > 0) {
                 s.nodes[int(v->a.type)]++;
-                if (v->a.type == Type::REG)
+                if (v->a.type == Type::REG) {
                     s.totalSize += v->a.size;
+                }
             }
         }
-        for (auto const& [key, ivs] : m_links)
-            for (auto const& iv : ivs)
-                if (liveAt(iv, rg))
+        for (auto const& [key, ivs] : m_links) {
+            for (auto const& iv : ivs) {
+                if (liveAt(iv, rg)) {
                     s.links++;
+                }
+            }
+        }
         return s;
     }
 
@@ -340,14 +364,16 @@ private:
     // effective version at a resolved snapshot (largest snap <= rg), or null
     NodeVer const* effR(uint64_t id, SnapId rg) const {
         auto it = m_nodes.find(id);
-        if (it == m_nodes.end())
+        if (it == m_nodes.end()) {
             return nullptr;
+        }
         NodeVer const* best = nullptr;
         for (auto const& v : it->second) {
-            if (v.snap <= rg)
+            if (v.snap <= rg) {
                 best = &v;
-            else
+            } else {
                 break;
+            }
         }
         return best;
     }
@@ -357,8 +383,9 @@ private:
     // copy-on-write the node into m_cur and return the live version
     NodeVer& liveVer(uint64_t id) {
         auto& vs = m_nodes[id];
-        if (!vs.empty() && vs.back().snap == m_cur)
+        if (!vs.empty() && vs.back().snap == m_cur) {
             return vs.back();
+        }
         NodeVer nv =
             vs.empty() ? NodeVer{m_cur, {}, ""} : NodeVer{m_cur, vs.back().a, vs.back().blob};
         vs.push_back(std::move(nv));
@@ -372,25 +399,29 @@ private:
     }
 
     static LinkIv* liveIv(std::vector<LinkIv>& ivs, SnapId rg) {
-        for (auto& iv : ivs)
-            if (liveAt(iv, rg))
+        for (auto& iv : ivs) {
+            if (liveAt(iv, rg)) {
                 return &iv;
+            }
+        }
         return nullptr;
     }
 
     static bool liveAtR(std::vector<LinkIv> const& ivs, SnapId rg, uint64_t& child) {
-        for (auto const& iv : ivs)
+        for (auto const& iv : ivs) {
             if (liveAt(iv, rg)) {
                 child = iv.child;
                 return true;
             }
+        }
         return false;
     }
 
     bool linkLiveAt(std::pair<uint64_t, std::string> const& key, SnapId g, uint64_t& child) const {
         auto it = m_links.find(key);
-        if (it == m_links.end())
+        if (it == m_links.end()) {
             return false;
+        }
         return liveAtR(it->second, resolve(g), child);
     }
 
@@ -401,19 +432,23 @@ private:
         while (!stack.empty()) {
             uint64_t n = stack.back();
             stack.pop_back();
-            if (n == to)
+            if (n == to) {
                 return true;
-            if (!seen.insert(n).second)
+            }
+            if (!seen.insert(n).second) {
                 continue;
+            }
             auto ni = m_names.find(n);
-            if (ni == m_names.end())
+            if (ni == m_names.end()) {
                 continue;
+            }
             for (auto const& name : ni->second) {
                 uint64_t child;
                 if (linkLiveAt({n, name}, LATEST, child)) {
                     NodeVer const* cv = eff(child, LATEST);
-                    if (cv && cv->a.type == Type::DIR)
+                    if (cv && cv->a.type == Type::DIR) {
                         stack.push_back(child);
+                    }
                 }
             }
         }
@@ -509,15 +544,17 @@ void MemNode::ctime(uint64_t x) {
 }
 
 std::string MemNode::target() const {
-    if (type() != Type::LNK)
+    if (type() != Type::LNK) {
         return "";
+    }
     auto v = m_store->eff(m_id, m_snap);
     return v ? v->blob : "";
 }
 
 std::string MemNode::content() const {
-    if (type() != Type::REG)
+    if (type() != Type::REG) {
         return "";
+    }
     auto v = m_store->eff(m_id, m_snap);
     return v ? v->blob : "";
 }

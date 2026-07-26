@@ -47,8 +47,9 @@ public:
     }
 
     bool next() override {
-        if (m_it != m_map.end())
+        if (m_it != m_map.end()) {
             ++m_it;
+        }
         return m_it != m_map.end();
     }
 
@@ -82,8 +83,9 @@ public:
     bool get(Kv k, std::string_view key, std::string& out) override {
         auto& m = s(k);
         auto it = m.find(key);
-        if (it == m.end())
+        if (it == m.end()) {
             return false;
+        }
         out = it->second;
         return true;
     }
@@ -95,8 +97,9 @@ public:
     void del(Kv k, std::string_view key) override {
         auto& m = s(k);
         auto it = m.find(key);
-        if (it != m.end())
+        if (it != m.end()) {
             m.erase(it);
+        }
     }
 
     std::unique_ptr<IKvCursor> cursor(Kv k) override { return std::make_unique<MemCursor>(s(k)); }
