@@ -8,7 +8,11 @@
 //
 //  Usage:
 //    prfs-host [--store PATH] [--clean] [--engine NAME] [--port N] \
-//              [--plugin FILE.so]...
+//              [--plugin FILE.so]... [--plugin-dir DIR]...
+//
+//  Plugin discovery: --plugin loads a specific .so; --plugin-dir loads every
+//  *.so in a directory. If neither is given, prfs-host scans its own directory
+//  (so `./build/prfs-host` finds `./build/*.so`).
 //
 #include "prfs/host.hpp"
 #include "prfs/prfs.hpp"
@@ -16,16 +20,50 @@
 #include <CLI/CLI.hpp>
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <filesystem>
 #include <string>
 #include <unistd.h>
 #include <vector>
+
+namespace stdfs = std::filesystem;
 
 namespace {
 std::atomic<bool> g_stop{false};
 
 void onSignal(int) { g_stop = true; }
+
+//  Directory of the running executable (for the default plugin scan).
+std::string exeDir() {
+    char buf[4096];
+    ssize_t k = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (k <= 0) {
+        return ".";
+    }
+    buf[k] = '\0';
+    return stdfs::path(buf).parent_path().string();
+}
+
+//  Load every *.so in `dir` as a plugin (sorted for a deterministic order).
+void loadDir(prfs::host::Loader& loader, spdlog::logger& log, std::string const& dir) {
+    std::error_code ec;
+    std::vector<std::string> sos;
+    for (auto const& e : stdfs::directory_iterator(dir, ec)) {
+        if (e.is_regular_file() && e.path().extension() == ".so") {
+            sos.push_back(e.path().string());
+        }
+    }
+    if (ec) {
+        log.warn("prfs-host: cannot scan plugin dir {}: {}", dir, ec.message());
+        return;
+    }
+    std::sort(sos.begin(), sos.end());
+    for (std::string const& so : sos) {
+        loader.load(so);
+    }
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -35,12 +73,14 @@ int main(int argc, char** argv) {
     bool clean = false;
     int port = 0;
     std::vector<std::string> plugins;
+    std::vector<std::string> pluginDirs;
 
     app.add_option("--store", store, "store path");
     app.add_flag("--clean", clean, "wipe the store on open");
     app.add_option("--engine", engine, "storage engine (di name): lmdb | memory");
     app.add_option("--port", port, "TCP port for NFS/MOUNT services (default 2049)");
     app.add_option("--plugin", plugins, "front-end plugin .so to load")->expected(-1);
+    app.add_option("--plugin-dir", pluginDirs, "directory to scan for *.so plugins")->expected(-1);
     CLI11_PARSE(app, argc, argv);
 
     auto log = spdlog::default_logger();
@@ -60,6 +100,13 @@ int main(int argc, char** argv) {
         prfs::host::Loader loader(host);
         for (std::string const& p : plugins) {
             loader.load(p);
+        }
+        for (std::string const& d : pluginDirs) {
+            loadDir(loader, *log, d);
+        }
+        //  Nothing named explicitly → discover plugins next to the executable.
+        if (plugins.empty() && pluginDirs.empty()) {
+            loadDir(loader, *log, exeDir());
         }
         loader.startServices();
 

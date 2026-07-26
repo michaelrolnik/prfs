@@ -107,6 +107,15 @@ constexpr uint32_t NFS3_OK = 0, NFS3ERR_PERM = 1, NFS3ERR_NOENT = 2, NFS3ERR_EXI
 //  access3 bits — what this synthetic (read-mostly) target grants.
 constexpr uint32_t ACCESS3_READ = 0x0001, ACCESS3_LOOKUP = 0x0002, ACCESS3_EXECUTE = 0x0020;
 
+//  RPC auth flavors we care about (RFC 5531). AUTH_SYS carries uid/gid.
+constexpr uint32_t AUTH_SYS = 1;
+
+//  Caller identity taken from the RPC credential. Absent/other flavor → root.
+struct Cred {
+    uint32_t uid = 0, gid = 0;
+    bool sys = false;
+};
+
 uint32_t rd32(uint8_t const* p) {
     return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]);
 }
@@ -188,6 +197,29 @@ struct Reader {
         return true;
     }
 };
+
+//  Parse an opaque_auth credential (flavor + body<400>). For AUTH_SYS the body
+//  is {stamp, machinename<>, uid, gid, gids<>} — pull uid/gid out; then advance
+//  past the whole body regardless of flavor.
+Cred readCred(Reader& r) {
+    Cred c;
+    uint32_t flavor = r.u32();
+    uint32_t len = r.u32();
+    size_t end = r.pos + ((len + 3u) & ~size_t(3));
+    if (!r.ok || end > r.n) {
+        r.ok = false;
+        return c;
+    }
+    if (flavor == AUTH_SYS) {
+        r.u32();        // stamp
+        r.skipOpaque(); // machinename<>
+        c.uid = r.u32();
+        c.gid = r.u32();
+        c.sys = true;
+    }
+    r.pos = end; // consume the credential in full (incl. gids / any flavor body)
+    return c;
+}
 
 //  XDR writer appending big-endian words to a byte vector.
 struct Writer {
@@ -334,6 +366,15 @@ void encodeWcc(Writer& w, PreAttr const& before, INode* after) {
     encodePostOp(w, after);
 }
 
+//  Stamp a new node's ownership from the caller's AUTH_SYS credential (applied
+//  before the client's sattr3, which may still override it).
+void applyCred(Cred const& cred, Node const& n) {
+    if (cred.sys && n) {
+        n->uid(cred.uid);
+        n->gid(cred.gid);
+    }
+}
+
 size_t pad4(size_t n) { return (n + 3) & ~size_t(3); }
 
 //  One READDIR entry with the cookie the client returns to resume after it.
@@ -453,10 +494,10 @@ private:
                 uint32_t prog = r.u32();
                 uint32_t vers = r.u32();
                 uint32_t proc = r.u32();
-                r.skipAuth(); // cred
-                r.skipAuth(); // verf
+                Cred cred = readCred(r); // AUTH_SYS uid/gid, if present
+                r.skipAuth();            // verf
 
-                std::vector<uint8_t> frame = reply(xid, prog, vers, proc, r);
+                std::vector<uint8_t> frame = reply(xid, prog, vers, proc, cred, r);
                 co_await asio::async_write(sock, asio::buffer(frame), asio::use_awaitable);
             }
         } catch (std::exception const&) {
@@ -466,11 +507,11 @@ private:
 
     //  Build a complete record-marked accepted reply for one call.
     std::vector<uint8_t> reply(uint32_t xid, uint32_t prog, uint32_t vers, uint32_t proc,
-                               Reader& r) {
+                               Cred const& cred, Reader& r) {
         std::vector<uint8_t> result; // proc result, appended only on SUCCESS
         uint32_t astat;
         if (prog == PROG_NFS) {
-            astat = vers == NFS_V3 ? nfsCall(proc, r, result) : PROG_MISMATCH;
+            astat = vers == NFS_V3 ? nfsCall(proc, cred, r, result) : PROG_MISMATCH;
         } else if (prog == PROG_MOUNT) {
             astat = vers == MOUNT_V3 ? mountCall(proc, r, result) : PROG_MISMATCH;
         } else {
@@ -501,7 +542,7 @@ private:
     //  Dispatch one NFS procedure. Returns the RPC accept_stat; on SUCCESS the
     //  XDR-encoded procedure result (starting with nfsstat3) is written to `out`.
     //  One handler per procedure — each reads its args and writes its result.
-    uint32_t nfsCall(uint32_t proc, Reader& r, std::vector<uint8_t>& out) {
+    uint32_t nfsCall(uint32_t proc, Cred const& cred, Reader& r, std::vector<uint8_t>& out) {
         Writer w{out};
         switch (proc) {
         case NFSPROC3_NULL:
@@ -521,13 +562,13 @@ private:
         case NFSPROC3_WRITE:
             return nfsWrite(r, w);
         case NFSPROC3_CREATE:
-            return nfsCreate(r, w);
+            return nfsCreate(cred, r, w);
         case NFSPROC3_MKDIR:
-            return nfsMkdir(r, w);
+            return nfsMkdir(cred, r, w);
         case NFSPROC3_SYMLINK:
-            return nfsSymlink(r, w);
+            return nfsSymlink(cred, r, w);
         case NFSPROC3_MKNOD:
-            return nfsMknod(r, w);
+            return nfsMknod(cred, r, w);
         case NFSPROC3_REMOVE:
             return nfsRemove(r, w);
         case NFSPROC3_RMDIR:
@@ -1055,7 +1096,7 @@ private:
         return SUCCESS;
     }
 
-    uint32_t nfsCreate(Reader& r, Writer& w) {
+    uint32_t nfsCreate(Cred const& cred, Reader& r, Writer& w) {
         IPrfs& fs = m_host.fs();
         Node dir;
         PreAttr pre;
@@ -1084,6 +1125,7 @@ private:
             return SUCCESS;
         }
         Node child = fs.mkfile("");
+        applyCred(cred, child);
         if (mode == CREATE_EXCLUSIVE) {
             r.skip(8); // createverf3
         } else {
@@ -1092,7 +1134,7 @@ private:
         return finishCreate(w, dir, pre, name, child);
     }
 
-    uint32_t nfsMkdir(Reader& r, Writer& w) {
+    uint32_t nfsMkdir(Cred const& cred, Reader& r, Writer& w) {
         IPrfs& fs = m_host.fs();
         Node dir;
         PreAttr pre;
@@ -1101,11 +1143,12 @@ private:
             return SUCCESS;
         }
         Node child = fs.mkdir();
+        applyCred(cred, child);
         applySattr(r, child); // sattr3
         return finishCreate(w, dir, pre, name, child);
     }
 
-    uint32_t nfsSymlink(Reader& r, Writer& w) {
+    uint32_t nfsSymlink(Cred const& cred, Reader& r, Writer& w) {
         IPrfs& fs = m_host.fs();
         Node dir;
         PreAttr pre;
@@ -1114,6 +1157,7 @@ private:
             return SUCCESS;
         }
         Node child = fs.symlink("");
+        applyCred(cred, child);
         applySattr(r, child);         // symlink_attributes (sattr3)
         std::string target = r.str(); // nfspath3 symlink_data
         if (!r.ok) {
@@ -1123,7 +1167,7 @@ private:
         return finishCreate(w, dir, pre, name, child);
     }
 
-    uint32_t nfsMknod(Reader& r, Writer& w) {
+    uint32_t nfsMknod(Cred const& cred, Reader& r, Writer& w) {
         IPrfs& fs = m_host.fs();
         Node dir;
         PreAttr pre;
@@ -1135,15 +1179,18 @@ private:
         Node child;
         if (type == NF3BLK || type == NF3CHR) {
             child = fs.mknod(type == NF3BLK ? Type::BLK : Type::CHR, 0, 0);
+            applyCred(cred, child);
             applySattr(r, child); // dev_attributes
             uint32_t maj = r.u32();
             uint32_t min = r.u32(); // specdata3
             fs.setRdev(child, maj, min);
         } else if (type == NF3FIFO) {
             child = fs.mkfifo();
+            applyCred(cred, child);
             applySattr(r, child);
         } else if (type == NF3SOCK) {
             child = fs.mksock();
+            applyCred(cred, child);
             applySattr(r, child);
         } else {
             w.u32(NFS3ERR_BADTYPE);
