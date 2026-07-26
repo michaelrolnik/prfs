@@ -41,4 +41,23 @@ size_t read(ContentConfig const&, uint64_t fileSeed, uint64_t size, uint64_t off
 //  st_blocks support: 512-byte blocks actually allocated (holes excluded).
 uint64_t allocatedBlocks(ContentConfig const&, uint64_t fileSeed, uint64_t size);
 
+//  Content generation as a di interface (docs/plugins.md). The byte source for a
+//  file, keyed by an OPAQUE config blob — each provider owns its own config
+//  format (the store persists the blob but never parses it). The default
+//  provider ("config") is the generator above; a plugin can register others.
+//  The active provider is a run-wide di name, selected like rng.
+struct IContentProvider {
+    static constexpr std::string_view ID = "prfs.content/1";
+
+    virtual ~IContentProvider() = default;
+    virtual size_t read(std::string_view config, uint64_t fileSeed, uint64_t size, uint64_t offset,
+                        char* out, size_t len) const = 0;
+    virtual uint64_t allocatedBlocks(std::string_view config, uint64_t fileSeed,
+                                     uint64_t size) const = 0;
+};
+
+std::string provider();             // active content-provider name (default "config")
+void setProvider(std::string_view); // throws std::out_of_range if unregistered
+IContentProvider const& activeProvider();
+
 } // namespace prfs::content

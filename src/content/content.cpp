@@ -11,6 +11,7 @@
 //
 #include "prfs/content.hpp"
 
+#include "prfs/di.hpp"
 #include "prfs/rng.hpp"
 
 #include <algorithm>
@@ -163,6 +164,39 @@ uint64_t allocatedBlocks(ContentConfig const& c, uint64_t seed, uint64_t size) {
         allocBytes += std::min<uint64_t>(bs, size - b * bs);
     }
     return (allocBytes + 511) / 512;
+}
+
+//  The default content provider — the config-driven generator above, behind the
+//  IContentProvider di interface. Its opaque config is a serialized ContentConfig.
+namespace {
+struct DefaultProvider : IContentProvider {
+    size_t read(std::string_view cfg, uint64_t seed, uint64_t size, uint64_t off, char* out,
+                size_t len) const override {
+        return prfs::content::read(deserialize(cfg), seed, size, off, out, len);
+    }
+
+    uint64_t allocatedBlocks(std::string_view cfg, uint64_t seed, uint64_t size) const override {
+        return prfs::content::allocatedBlocks(deserialize(cfg), seed, size);
+    }
+};
+} // namespace
+
+static DefaultProvider g_defaultProvider;
+static di::Register<IContentProvider> const reg{&g_defaultProvider, "config"};
+
+static std::string s_provider;
+
+std::string provider() { return s_provider.empty() ? "config" : s_provider; }
+
+void setProvider(std::string_view name) {
+    if (!di::global().has(IContentProvider::ID, name)) {
+        throw std::out_of_range("content: unknown provider '" + std::string(name) + "'");
+    }
+    s_provider = std::string(name);
+}
+
+IContentProvider const& activeProvider() {
+    return di::global().resolve<IContentProvider>(provider());
 }
 
 } // namespace prfs::content

@@ -34,6 +34,19 @@ foreach t : tests
     test(t[0], exe, timeout : t[2])
 endforeach
 
+#   Plugin host — dlopens the null.so built above; NULL_PLUGIN_SO is its path.
+if get_option('plugins')
+    test_host = executable(
+        'test_host',
+        'host/host_test.cpp',
+        include_directories : [test_inc, prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],
+        cpp_args            : ['-DNULL_PLUGIN_SO="' + null_so.full_path() + '"'],
+        dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
+    )
+    test('host', test_host, depends : null_so, timeout : 60)
+endif
+
 #   DI registry is header-only (include/prfs/di.hpp) — links only gtest.
 test_di = executable(
     'test_di',

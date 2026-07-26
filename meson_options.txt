@@ -30,3 +30,10 @@ option(
     value       : 'philox',
     description : 'build-time default content RNG (run-wide; overridable once at startup).',
 )
+
+option(
+    'plugins',
+    type        : 'boolean',
+    value       : true,
+    description : 'build the plugin host (prfs-host, spdlog+CLI11) and the null test plugin.',
+)

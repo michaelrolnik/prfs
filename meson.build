@@ -171,6 +171,56 @@ if get_option('lua')
     test('lua-scenario', prfs_test, args : files('tests/lua/smoke.lua'), timeout : 60)
 endif
 
+#   Plugin host — prfs-host loads front-end plugins (docs/plugins.md). spdlog +
+#   CLI11 are the host-layer git submodules; leaf libraries stay logging/CLI-free.
+null_so = disabler()
+prfs_host_dep = disabler()
+spdlog_inc = []
+if get_option('plugins')
+    cpp = meson.get_compiler('cpp')
+    spdlog_inc = include_directories('third_party/spdlog/include', is_system : true)
+    cli11_inc = include_directories('third_party/CLI11/include', is_system : true)
+    dl_dep = cpp.find_library('dl', required : false)
+    threads_dep = dependency('threads')
+
+    host_deps = [prfs_dep, dl_dep, threads_dep]
+    host_args = []
+    if get_option('content')
+        host_deps += prfs_content_dep  # procedural READ via the active content provider
+        host_args += '-DPRFS_WITH_CONTENT'
+    endif
+
+    libprfs_host = static_library(
+        'prfs-host',
+        'src/host/host.cpp',
+        include_directories : [prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],  # spdlog/fmt are warning-heavy
+        cpp_args            : host_args,
+        dependencies        : host_deps,
+    )
+    prfs_host_dep = declare_dependency(
+        link_with           : libprfs_host,
+        include_directories : [prfs_inc, spdlog_inc],
+        dependencies        : host_deps,
+    )
+
+    #   The null test/reference front-end, as a loadable module (→ null.so).
+    null_so = shared_module(
+        'null',
+        'plugins/null/null.cpp',
+        include_directories : prfs_inc,
+        name_prefix         : '',
+    )
+
+    executable(
+        'prfs-host',
+        'src/host/main.cpp',
+        include_directories : [prfs_inc, spdlog_inc, cli11_inc],
+        override_options    : ['warning_level=0'],
+        dependencies        : [prfs_host_dep, dl_dep, threads_dep],
+    )
+endif
+
 #   Formatting — clang-format (.clang-format) is the style authority.
 #   `meson compile format` rewrites in place; the `clang-format` test gates it.
 clang_format = find_program('clang-format', required : false)
@@ -197,6 +247,12 @@ fmt_files = files(
     'include/prfs/lua.hpp',
     'src/lua/bindings.cpp',
     'src/lua/harness.cpp',
+    'include/prfs/plugin.hpp',
+    'include/prfs/host.hpp',
+    'src/host/host.cpp',
+    'src/host/main.cpp',
+    'plugins/null/null.cpp',
+    'tests/host/host_test.cpp',
     'tests/support.hpp',
     'tests/core/clock.cpp',
     'tests/core/contract.cpp',

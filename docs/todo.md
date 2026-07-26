@@ -39,7 +39,7 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 | L2  | ⬜     | NFS front-ends as plugins: `nfsv3`, `mount`, `nfsv4` (under the L5 host)    |
 | L3  | ⬜     | GC / compaction: reclaim superseded link-set versions + unref content       |
 | L4  | ⬜     | Dedup-ratio stats (phase-2): content refcounting                            |
-| L5  | 🚧     | DI registry (di.md) ✅ built · plugin host (plugins.md) next               |
+| L5  | 🚧     | DI registry ✅ · plugin host 🚧 (loader, null plugin, prfs-host built)     |
 
 ---
 
@@ -86,4 +86,4 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 - **L3** ⬜ — **GC / compaction**: reclaim superseded link-set versions + unreferenced `content`/`strings`.
 - **L4** ⬜ — **Dedup-ratio stats** (phase-2): content refcounting (`logicalSize` vs `physicalSize`).
 - **L5a** ✅ — **DI registry** ([`docs/di.md`](di.md)): header-only `include/prfs/di.hpp` — typed container keyed by `(interface-id, name)`: `provide`/`resolve`/`tryResolve`/`resolveAll`/`withdraw`/`has`/`names`/`ids`/`require`/`requireAllResolved`, a `Register` self-registration helper, and a `global()` Meyers singleton. Fail-loud (`resolve` throws `Unresolved`); a `Registry` *is* a scope (RAII). `tests/di/di_test.cpp` (9 cases). `rng` is migrated onto it as the first real provider: generators implement `IRng` and self-register (`di::Register<IRng>`, `link_whole`), `content` resolves via `di::resolve<IRng>`.
-- **L5b** ⬜ — **Plugin host** ([`docs/plugins.md`](plugins.md)) over the DI registry: versioned interfaces (`IFrontend`/`IRng`/`IStorageEngine`); a plugin **provides** its implementations into the registry (name = variant), the host **resolves** (`resolveAll<IFrontend>` → start; engine/rng by name). C++ interfaces + `extern "C"` ABI-versioned factory; loader = built-in providers + `dlopen` (+ `withdraw` on unload); front-ends add CLI args (`options()` → CLI11); CLI11+spdlog host layer; `null` test plugin. L2 NFS front-ends and the LMDB/mem engines and rng generators are all providers.
+- **L5b** 🚧 — **Plugin host** ([`docs/plugins.md`](plugins.md)) over the DI registry. **Built:** `include/prfs/plugin.hpp` (`IHost`, `IPlugin`, `IFrontend`, `ABI`, `extern "C"` factory); `include/prfs/host.hpp` + `src/host/host.cpp` (`Host` = IHost; `Loader` = `dlopen`+ABI-check+create → provide, `resolveAll<IFrontend>`→start, teardown → stop/destroy/`withdraw`/`dlclose`); `plugins/null/null.cpp` (the `null.so` reference front-end); `prfs-host` executable (CLI11 + spdlog, loads `--plugin` .so's, `--engine` by name). spdlog + CLI11 vendored as submodules. `IContentProvider` added — content generation is now a di provider too (default `"config"`; `Host::read` resolves it). `tests/host/host_test.cpp` (adopt, dlopen lifecycle, bad-path). Engines/rng/content are all di providers. **Next:** per-plugin CLI option plumbing (`options()`→CLI11 namespaced) + `requireAllResolved`; a real serve loop (block until signal); then L2 NFS front-ends as plugins.
