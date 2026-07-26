@@ -4,9 +4,10 @@
 //
 //  nfsv3 plugin — end-to-end RPC test. Loads nfsv3.so via the host, then over a
 //  TCP connection walks the real client flow: MOUNT MNT to obtain the root
-//  filehandle, then NFS NULL/GETATTR/LOOKUP/ACCESS/READ against the live store
-//  the host wraps. Proves the transport (record marking + call/reply) and the
-//  XDR / filehandle mapping. NFSV3_PLUGIN_SO is the .so path.
+//  filehandle, then NFS GETATTR/LOOKUP/ACCESS/READ/READDIR/READDIRPLUS/FSSTAT/
+//  FSINFO against the live store the host wraps. Proves the transport (record
+//  marking + call/reply) and the XDR / filehandle mapping. NFSV3_PLUGIN_SO is
+//  the .so path.
 //
 #include "prfs/host.hpp"
 #include "prfs/memstore.hpp"
@@ -21,6 +22,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -51,6 +53,13 @@ uint32_t get32(uint8_t const* p) {
 }
 
 uint64_t get64(uint8_t const* p) { return uint64_t(get32(p)) << 32 | get32(p + 4); }
+
+size_t pad4(size_t n) { return (n + 3) & ~size_t(3); }
+
+void putU64(std::vector<uint8_t>& v, uint64_t x) {
+    put32(v, uint32_t(x >> 32));
+    put32(v, uint32_t(x));
+}
 
 std::vector<uint8_t> fhArg(uint64_t id, uint64_t snap) {
     std::vector<uint8_t> a;
@@ -236,6 +245,112 @@ TEST(NfsV3, MountWalkStat) {
 
     //  GETATTR a bogus fh → NFS3ERR_STALE (70).
     EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(999999, LAT)).body[0]), 70u);
+
+    //  READDIR the root. Body: status(4) + present dir_attr(88) + cookieverf(8)
+    //  = entries begin at 100; each is vf(4)+fileid(8)+name<>+cookie(8), the list
+    //  ends with vf=0 then eof. Expect ".", "..", "hello".
+    std::vector<uint8_t> ddArgs = fhArg(fhId, fhSnap);
+    putU64(ddArgs, 0);   // cookie 0 (from the start)
+    putU64(ddArgs, 0);   // cookieverf[8]
+    put32(ddArgs, 8192); // count
+    Reply dd = rpc(fd, PROG_NFS, NFS_V3, 16, ddArgs);
+    ASSERT_EQ(dd.astat, 0u);
+    EXPECT_EQ(get32(&dd.body[0]), 0u); // NFS3_OK
+    {
+        size_t o = 100;
+        std::vector<std::string> names;
+        while (get32(&dd.body[o]) == 1) {
+            o += 4; // value-follows
+            o += 8; // fileid
+            uint32_t nl = get32(&dd.body[o]);
+            o += 4;
+            names.emplace_back(reinterpret_cast<char const*>(&dd.body[o]), nl);
+            o += pad4(nl);
+            o += 8; // cookie
+        }
+        EXPECT_EQ(get32(&dd.body[o + 4]), 1u); // eof
+        EXPECT_EQ(names.size(), 3u);
+        EXPECT_NE(std::find(names.begin(), names.end(), "."), names.end());
+        EXPECT_NE(std::find(names.begin(), names.end(), ".."), names.end());
+        EXPECT_NE(std::find(names.begin(), names.end(), "hello"), names.end());
+    }
+
+    //  READDIR resuming after cookie 2 (past "." and "..") → just "hello".
+    std::vector<uint8_t> ddArgs2 = fhArg(fhId, fhSnap);
+    putU64(ddArgs2, 2);
+    putU64(ddArgs2, 0);
+    put32(ddArgs2, 8192);
+    Reply dd2 = rpc(fd, PROG_NFS, NFS_V3, 16, ddArgs2);
+    ASSERT_EQ(dd2.astat, 0u);
+    {
+        size_t o = 100;
+        int n = 0;
+        while (get32(&dd2.body[o]) == 1) {
+            o += 4 + 8;
+            o += 4 + pad4(get32(&dd2.body[o]));
+            o += 8;
+            ++n;
+        }
+        EXPECT_EQ(n, 1); // only "hello" remains
+    }
+
+    //  READDIRPLUS: like READDIR but each entry carries name_attributes
+    //  (post_op_attr) and name_handle (post_op_fh3).
+    std::vector<uint8_t> dpArgs = fhArg(fhId, fhSnap);
+    putU64(dpArgs, 0);   // cookie
+    putU64(dpArgs, 0);   // cookieverf
+    put32(dpArgs, 4096); // dircount
+    put32(dpArgs, 8192); // maxcount
+    Reply dp = rpc(fd, PROG_NFS, NFS_V3, 17, dpArgs);
+    ASSERT_EQ(dp.astat, 0u);
+    EXPECT_EQ(get32(&dp.body[0]), 0u);
+    {
+        size_t o = 100;
+        int n = 0;
+        bool sawHello = false;
+        while (get32(&dp.body[o]) == 1) {
+            o += 4; // value-follows
+            uint64_t fid = get64(&dp.body[o]);
+            o += 8;
+            uint32_t nl = get32(&dp.body[o]);
+            o += 4;
+            std::string nm(reinterpret_cast<char const*>(&dp.body[o]), nl);
+            o += pad4(nl);
+            o += 8;                        // cookie
+            if (get32(&dp.body[o]) == 1) { // name_attributes present
+                o += 4 + 84;
+            } else {
+                o += 4;
+            }
+            if (get32(&dp.body[o]) == 1) { // name_handle present
+                o += 4;
+                o += 4 + pad4(get32(&dp.body[o]));
+            } else {
+                o += 4;
+            }
+            if (nm == "hello") {
+                sawHello = true;
+                EXPECT_EQ(fid, fileId);
+            }
+            ++n;
+        }
+        EXPECT_EQ(get32(&dp.body[o + 4]), 1u); // eof
+        EXPECT_EQ(n, 3);
+        EXPECT_TRUE(sawHello);
+    }
+
+    //  FSSTAT: obj_attr then the six size3 counters + invarsec. tbytes is the
+    //  advertised capacity (FsConfig default, 1 TiB).
+    Reply fst = rpc(fd, PROG_NFS, NFS_V3, 18, fhArg(fhId, fhSnap));
+    ASSERT_EQ(fst.astat, 0u);
+    EXPECT_EQ(get32(&fst.body[0]), 0u);                 // NFS3_OK
+    EXPECT_EQ(get64(&fst.body[92]), uint64_t(1) << 40); // tbytes
+
+    //  FSINFO: obj_attr then the transfer parameters. rtmax matches MAX_READ.
+    Reply fsi = rpc(fd, PROG_NFS, NFS_V3, 19, fhArg(fhId, fhSnap));
+    ASSERT_EQ(fsi.astat, 0u);
+    EXPECT_EQ(get32(&fsi.body[0]), 0u);        // NFS3_OK
+    EXPECT_EQ(get32(&fsi.body[92]), 1u << 20); // rtmax
 
     ::close(fd);
     loader.stopAll();

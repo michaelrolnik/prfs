@@ -214,7 +214,9 @@ if get_option('plugins')
         name_prefix         : '',
     )
 
-    #   nfsv3 front-end service (→ nfsv3.so). Asio coroutines + threads + spdlog.
+    #   nfsv3 front-end service (→ nfsv3.so). Asio coroutines + threads + spdlog;
+    #   prfs_nfs_dep bakes the FSSTAT/FSINFO projection into the module so it has
+    #   no undefined symbols at dlopen (the host is loaded RTLD_LOCAL).
     nfsv3_so = shared_module(
         'nfsv3',
         'plugins/nfsv3/nfsv3.cpp',
@@ -222,7 +224,7 @@ if get_option('plugins')
         override_options    : ['warning_level=0'],
         cpp_args            : ['-DASIO_STANDALONE'],
         name_prefix         : '',
-        dependencies        : [threads_dep],
+        dependencies        : [threads_dep, prfs_nfs_dep],
     )
 
     executable(

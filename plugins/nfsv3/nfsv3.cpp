@@ -7,9 +7,11 @@
 //  listener, both the MOUNT program (100005 v3: MNT/UMNT/EXPORT) and the NFS
 //  program (100003 v3). Implemented so far: MOUNT MNT hands out the root
 //  filehandle for the single export "/"; NFS NULL, GETATTR, LOOKUP, ACCESS let a
-//  client walk the tree and stat nodes, and READ returns file bytes (sourced by
-//  the host — procedural content or literal). Remaining procedures (READDIR,
-//  FSSTAT/FSINFO, READLINK, …) build on the same dispatch.
+//  client walk the tree and stat nodes, READ returns file bytes (sourced by the
+//  host — procedural content or literal), READDIR/READDIRPLUS list directories
+//  (with synthesized "." and ".."), and FSSTAT/FSINFO report volume usage and
+//  server parameters (the libprfs_nfs §9 projection). Remaining procedures
+//  (READLINK, PATHCONF, …) build on the same dispatch.
 //
 //  Filehandle (nfs_fh3): 16 opaque bytes = big-endian (nodeID, snapId). Decoded
 //  back to a node via IPrfs::nodeById(); a null result maps to NFS3ERR_STALE.
@@ -24,6 +26,7 @@
 //  parallelism. Port comes from the "port" option (default 2049; 2049 needs
 //  privileges, so tests use a high port).
 //
+#include "prfs/fsstat.hpp"
 #include "prfs/plugin.hpp"
 
 #include <asio.hpp>
@@ -52,10 +55,14 @@ constexpr uint32_t SUCCESS = 0, PROG_UNAVAIL = 1, PROG_MISMATCH = 2, PROC_UNAVAI
 constexpr uint32_t PROG_NFS = 100003;
 constexpr uint32_t NFS_V3 = 3;
 constexpr uint32_t NFSPROC3_NULL = 0, NFSPROC3_GETATTR = 1, NFSPROC3_LOOKUP = 3,
-                   NFSPROC3_ACCESS = 4, NFSPROC3_READ = 6;
+                   NFSPROC3_ACCESS = 4, NFSPROC3_READ = 6, NFSPROC3_READDIR = 16,
+                   NFSPROC3_READDIRPLUS = 17, NFSPROC3_FSSTAT = 18, NFSPROC3_FSINFO = 19;
 
 //  Largest READ we answer in one reply (also the rtmax FSINFO will advertise).
 constexpr uint32_t MAX_READ = 1u << 20;
+
+//  cookieverf3 is a fixed 8-byte opaque array (no length prefix).
+constexpr size_t NFS3_COOKIEVERFSIZE = 8;
 
 //  MOUNT program (RFC 1813 appendix I) — v3 only. NFSv4 dropped MOUNT entirely
 //  (PUTROOTFH inside COMPOUND replaces it), so this lives with nfsv3, not apart.
@@ -124,6 +131,15 @@ struct Reader {
         std::string s(reinterpret_cast<char const*>(p + pos), len);
         pos += pad;
         return s;
+    }
+
+    //  Skip k raw bytes (a fixed-size opaque array, e.g. cookieverf3).
+    void skip(size_t k) {
+        if (pos + k > n) {
+            ok = false;
+            return;
+        }
+        pos += k;
     }
 
     //  opaque_auth: flavor + body<400>.
@@ -232,6 +248,35 @@ void encodePostOp(Writer& w, INode* n) {
     } else {
         w.u32(0);
     }
+}
+
+size_t pad4(size_t n) { return (n + 3) & ~size_t(3); }
+
+//  One READDIR entry with the cookie the client returns to resume after it.
+struct DirEnt {
+    uint64_t fileid;
+    std::string name;
+    uint64_t cookie;
+    Node node;
+};
+
+//  Build a directory's entry list with monotonic cookies. "." and ".." lead
+//  (".." resolves via the first parent, or self at the root), then the store's
+//  entries in its stable order. cookie = 1-based position, so cookie 0 means
+//  "from the start" and a resume drops every entry with cookie <= the client's.
+std::vector<DirEnt> listDir(IPrfs& fs, Node dir) {
+    std::vector<DirEnt> out;
+    out.push_back({dir->id(), ".", 0, dir});
+    std::vector<Node> ps = fs.parents(dir);
+    Node parent = ps.empty() ? dir : ps.front();
+    out.push_back({parent->id(), "..", 0, parent});
+    for (auto& [name, node] : fs.readdir(dir)) {
+        out.push_back({node->id(), name, 0, node});
+    }
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i].cookie = i + 1;
+    }
+    return out;
 }
 
 class NfsV3 : public IService {
@@ -371,177 +416,350 @@ private:
 
     //  Dispatch one NFS procedure. Returns the RPC accept_stat; on SUCCESS the
     //  XDR-encoded procedure result (starting with nfsstat3) is written to `out`.
+    //  One handler per procedure — each reads its args and writes its result.
     uint32_t nfsCall(uint32_t proc, Reader& r, std::vector<uint8_t>& out) {
-        IPrfs& fs = m_host.fs();
         Writer w{out};
-
         switch (proc) {
         case NFSPROC3_NULL:
             return SUCCESS; // empty result
-
-        case NFSPROC3_GETATTR: {
-            uint64_t id, snap;
-            if (!r.fh(id, snap)) {
-                return GARBAGE_ARGS;
-            }
-            Node n = fs.nodeById(id, snap);
-            if (!n) {
-                w.u32(NFS3ERR_STALE);
-                return SUCCESS;
-            }
-            w.u32(NFS3_OK);
-            encodeFattr(w, *n);
-            return SUCCESS;
-        }
-
-        case NFSPROC3_LOOKUP: {
-            uint64_t id, snap;
-            if (!r.fh(id, snap)) {
-                return GARBAGE_ARGS;
-            }
-            std::string name = r.str();
-            if (!r.ok) {
-                return GARBAGE_ARGS;
-            }
-            Node dir = fs.nodeById(id, snap);
-            if (!dir) {
-                w.u32(NFS3ERR_STALE);
-                return SUCCESS;
-            }
-            if (dir->type() != Type::DIR) {
-                w.u32(NFS3ERR_NOTDIR);
-                encodePostOp(w, dir.get()); // dir_attributes
-                return SUCCESS;
-            }
-            Node child = fs.lookup(dir, name);
-            if (!child) {
-                w.u32(NFS3ERR_NOENT);
-                encodePostOp(w, dir.get());
-                return SUCCESS;
-            }
-            w.u32(NFS3_OK);
-            w.fh(child->id(), snap);      // object fh keeps the dir's snap view
-            encodePostOp(w, child.get()); // obj_attributes
-            encodePostOp(w, dir.get());   // dir_attributes
-            return SUCCESS;
-        }
-
-        case NFSPROC3_ACCESS: {
-            uint64_t id, snap;
-            if (!r.fh(id, snap)) {
-                return GARBAGE_ARGS;
-            }
-            uint32_t want = r.u32();
-            if (!r.ok) {
-                return GARBAGE_ARGS;
-            }
-            Node n = fs.nodeById(id, snap);
-            if (!n) {
-                w.u32(NFS3ERR_STALE);
-                return SUCCESS;
-            }
-            w.u32(NFS3_OK);
-            encodePostOp(w, n.get());
-            //  Read-mostly target: grant read/lookup/execute, never modify.
-            w.u32(want & (ACCESS3_READ | ACCESS3_LOOKUP | ACCESS3_EXECUTE));
-            return SUCCESS;
-        }
-
-        case NFSPROC3_READ: {
-            uint64_t id, snap;
-            if (!r.fh(id, snap)) {
-                return GARBAGE_ARGS;
-            }
-            uint64_t off = r.u64();
-            uint32_t cnt = r.u32();
-            if (!r.ok) {
-                return GARBAGE_ARGS;
-            }
-            Node n = fs.nodeById(id, snap);
-            if (!n) {
-                w.u32(NFS3ERR_STALE);
-                return SUCCESS;
-            }
-            if (n->type() == Type::DIR) {
-                w.u32(NFS3ERR_ISDIR);
-                encodePostOp(w, n.get());
-                return SUCCESS;
-            }
-            if (n->type() != Type::REG) {
-                w.u32(NFS3ERR_INVAL);
-                encodePostOp(w, n.get());
-                return SUCCESS;
-            }
-            //  The host sources the bytes — procedural content (the RNG provider)
-            //  or literal, already clamped to the file size. cnt is capped so a
-            //  large request can't force an outsized allocation/reply.
-            if (cnt > MAX_READ) {
-                cnt = MAX_READ;
-            }
-            std::vector<char> buf(cnt);
-            size_t got = m_host.read(n, off, buf.data(), cnt);
-            bool eof = off + got >= n->size();
-            w.u32(NFS3_OK);
-            encodePostOp(w, n.get()); // file_attributes
-            w.u32(uint32_t(got));     // count
-            w.u32(eof ? 1 : 0);       // eof
-            w.opaque(buf.data(), got);
-            return SUCCESS;
-        }
-
+        case NFSPROC3_GETATTR:
+            return nfsGetattr(r, w);
+        case NFSPROC3_LOOKUP:
+            return nfsLookup(r, w);
+        case NFSPROC3_ACCESS:
+            return nfsAccess(r, w);
+        case NFSPROC3_READ:
+            return nfsRead(r, w);
+        case NFSPROC3_READDIR:
+            return nfsReaddir(r, w);
+        case NFSPROC3_READDIRPLUS:
+            return nfsReaddirPlus(r, w);
+        case NFSPROC3_FSSTAT:
+            return nfsFsstat(r, w);
+        case NFSPROC3_FSINFO:
+            return nfsFsinfo(r, w);
         default:
             m_host.log().info("nfsv3: unimplemented NFS proc {}", proc);
             return PROC_UNAVAIL;
         }
     }
 
+    uint32_t nfsGetattr(Reader& r, Writer& w) {
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        Node n = m_host.fs().nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        w.u32(NFS3_OK);
+        encodeFattr(w, *n);
+        return SUCCESS;
+    }
+
+    uint32_t nfsLookup(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        std::string name = r.str();
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node dir = fs.nodeById(id, snap);
+        if (!dir) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        if (dir->type() != Type::DIR) {
+            w.u32(NFS3ERR_NOTDIR);
+            encodePostOp(w, dir.get()); // dir_attributes
+            return SUCCESS;
+        }
+        Node child = fs.lookup(dir, name);
+        if (!child) {
+            w.u32(NFS3ERR_NOENT);
+            encodePostOp(w, dir.get());
+            return SUCCESS;
+        }
+        w.u32(NFS3_OK);
+        w.fh(child->id(), snap);      // object fh keeps the dir's snap view
+        encodePostOp(w, child.get()); // obj_attributes
+        encodePostOp(w, dir.get());   // dir_attributes
+        return SUCCESS;
+    }
+
+    uint32_t nfsAccess(Reader& r, Writer& w) {
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        uint32_t want = r.u32();
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node n = m_host.fs().nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        w.u32(NFS3_OK);
+        encodePostOp(w, n.get());
+        //  Read-mostly target: grant read/lookup/execute, never modify.
+        w.u32(want & (ACCESS3_READ | ACCESS3_LOOKUP | ACCESS3_EXECUTE));
+        return SUCCESS;
+    }
+
+    uint32_t nfsRead(Reader& r, Writer& w) {
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        uint64_t off = r.u64();
+        uint32_t cnt = r.u32();
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node n = m_host.fs().nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        if (n->type() == Type::DIR) {
+            w.u32(NFS3ERR_ISDIR);
+            encodePostOp(w, n.get());
+            return SUCCESS;
+        }
+        if (n->type() != Type::REG) {
+            w.u32(NFS3ERR_INVAL);
+            encodePostOp(w, n.get());
+            return SUCCESS;
+        }
+        //  The host sources the bytes — procedural content (the RNG provider) or
+        //  literal, already clamped to the file size. cnt is capped so a large
+        //  request can't force an outsized allocation/reply.
+        if (cnt > MAX_READ) {
+            cnt = MAX_READ;
+        }
+        std::vector<char> buf(cnt);
+        size_t got = m_host.read(n, off, buf.data(), cnt);
+        bool eof = off + got >= n->size();
+        w.u32(NFS3_OK);
+        encodePostOp(w, n.get()); // file_attributes
+        w.u32(uint32_t(got));     // count
+        w.u32(eof ? 1 : 0);       // eof
+        w.opaque(buf.data(), got);
+        return SUCCESS;
+    }
+
+    uint32_t nfsReaddir(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        uint64_t cookie = r.u64();
+        r.skip(NFS3_COOKIEVERFSIZE); // cookieverf
+        uint32_t count = r.u32();    // max reply size
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node dir = fs.nodeById(id, snap);
+        if (!dir) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        if (dir->type() != Type::DIR) {
+            w.u32(NFS3ERR_NOTDIR);
+            encodePostOp(w, dir.get());
+            return SUCCESS;
+        }
+        std::vector<DirEnt> ents = listDir(fs, dir);
+        w.u32(NFS3_OK);
+        encodePostOp(w, dir.get()); // dir_attributes
+        w.u32(0);                   // cookieverf[8]
+        w.u32(0);
+        size_t budget = 128; // rough allowance for the header already written
+        bool eof = true;
+        for (DirEnt const& e : ents) {
+            if (e.cookie <= cookie) {
+                continue;
+            }
+            size_t esz = 4 + 8 + 4 + pad4(e.name.size()) + 8;
+            if (budget + esz > count) {
+                eof = false;
+                break;
+            }
+            w.u32(1); // value-follows
+            w.u64(e.fileid);
+            w.str(e.name);
+            w.u64(e.cookie);
+            budget += esz;
+        }
+        w.u32(0); // end of entries
+        w.u32(eof ? 1 : 0);
+        return SUCCESS;
+    }
+
+    uint32_t nfsReaddirPlus(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        uint64_t cookie = r.u64();
+        r.skip(NFS3_COOKIEVERFSIZE); // cookieverf
+        r.u32();                     // dircount (advisory)
+        uint32_t maxcount = r.u32(); // max reply size
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node dir = fs.nodeById(id, snap);
+        if (!dir) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        if (dir->type() != Type::DIR) {
+            w.u32(NFS3ERR_NOTDIR);
+            encodePostOp(w, dir.get());
+            return SUCCESS;
+        }
+        std::vector<DirEnt> ents = listDir(fs, dir);
+        w.u32(NFS3_OK);
+        encodePostOp(w, dir.get());
+        w.u32(0); // cookieverf[8]
+        w.u32(0);
+        size_t budget = 128;
+        bool eof = true;
+        for (DirEnt const& e : ents) {
+            if (e.cookie <= cookie) {
+                continue;
+            }
+            //  entry + present post_op_attr (1 + fattr3 = 88) + present
+            //  post_op_fh3 (1 + fh = 4 + 20).
+            size_t esz = 4 + 8 + 4 + pad4(e.name.size()) + 8 + 88 + 24;
+            if (budget + esz > maxcount) {
+                eof = false;
+                break;
+            }
+            w.u32(1); // value-follows
+            w.u64(e.fileid);
+            w.str(e.name);
+            w.u64(e.cookie);
+            encodePostOp(w, e.node.get()); // name_attributes
+            w.u32(1);                      // name_handle present
+            w.fh(e.node->id(), snap);
+            budget += esz;
+        }
+        w.u32(0); // end of entries
+        w.u32(eof ? 1 : 0);
+        return SUCCESS;
+    }
+
+    uint32_t nfsFsstat(Reader& r, Writer& w) {
+        IPrfs& fs = m_host.fs();
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        Node n = fs.nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        FsStat st = fsStat(fs, {}, snap); // dynamic usage at this view
+        w.u32(NFS3_OK);
+        encodePostOp(w, n.get()); // obj_attributes
+        w.u64(st.tbytes);
+        w.u64(st.fbytes);
+        w.u64(st.abytes);
+        w.u64(st.tfiles);
+        w.u64(st.ffiles);
+        w.u64(st.afiles);
+        w.u32(st.invarsec);
+        return SUCCESS;
+    }
+
+    uint32_t nfsFsinfo(Reader& r, Writer& w) {
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        Node n = m_host.fs().nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        FsInfo fi = fsInfo(); // static server parameters
+        w.u32(NFS3_OK);
+        encodePostOp(w, n.get()); // obj_attributes
+        w.u32(fi.rtmax);
+        w.u32(fi.rtpref);
+        w.u32(fi.rtmult);
+        w.u32(fi.wtmax);
+        w.u32(fi.wtpref);
+        w.u32(fi.wtmult);
+        w.u32(fi.dtpref);
+        w.u64(fi.maxfilesize);
+        w.u32(fi.timeDeltaSec);
+        w.u32(fi.timeDeltaNsec);
+        w.u32(fi.properties);
+        return SUCCESS;
+    }
+
     //  Dispatch one MOUNT procedure. A single synthetic export, "/", whose MNT
     //  hands back the root filehandle every NFS call then builds on.
     uint32_t mountCall(uint32_t proc, Reader& r, std::vector<uint8_t>& out) {
-        IPrfs& fs = m_host.fs();
         Writer w{out};
-
         switch (proc) {
         case MOUNTPROC3_NULL:
             return SUCCESS;
-
-        case MOUNTPROC3_MNT: {
-            std::string path = r.str(); // dirpath (ignored — one export)
-            if (!r.ok) {
-                return GARBAGE_ARGS;
-            }
-            Node root = fs.rwRoot();
-            m_host.log().info("nfsv3: MNT \"{}\" -> root fileid {}", path, root->id());
-            w.u32(MNT3_OK);
-            w.fh(root->id(), LATEST); // fhandle3 — live root view
-            w.u32(2);                 // auth_flavors count
-            w.u32(0);                 // AUTH_NONE
-            w.u32(1);                 // AUTH_SYS
-            return SUCCESS;
-        }
-
-        case MOUNTPROC3_UMNT: {
-            std::string path = r.str();
-            if (!r.ok) {
-                return GARBAGE_ARGS;
-            }
-            m_host.log().info("nfsv3: UMNT \"{}\"", path);
-            return SUCCESS; // void result
-        }
-
-        case MOUNTPROC3_EXPORT: {
-            //  exportnode list: one entry "/" with no group restriction.
-            w.u32(1);   // value-follows
-            w.str("/"); // ex_dir
-            w.u32(0);   // ex_groups: none
-            w.u32(0);   // end of list
-            return SUCCESS;
-        }
-
+        case MOUNTPROC3_MNT:
+            return mountMnt(r, w);
+        case MOUNTPROC3_UMNT:
+            return mountUmnt(r, w);
+        case MOUNTPROC3_EXPORT:
+            return mountExport(r, w);
         default:
             m_host.log().info("nfsv3: unimplemented MOUNT proc {}", proc);
             return PROC_UNAVAIL;
         }
+    }
+
+    uint32_t mountMnt(Reader& r, Writer& w) {
+        std::string path = r.str(); // dirpath (ignored — one export)
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        Node root = m_host.fs().rwRoot();
+        m_host.log().info("nfsv3: MNT \"{}\" -> root fileid {}", path, root->id());
+        w.u32(MNT3_OK);
+        w.fh(root->id(), LATEST); // fhandle3 — live root view
+        w.u32(2);                 // auth_flavors count
+        w.u32(0);                 // AUTH_NONE
+        w.u32(1);                 // AUTH_SYS
+        return SUCCESS;
+    }
+
+    uint32_t mountUmnt(Reader& r, Writer&) {
+        std::string path = r.str();
+        if (!r.ok) {
+            return GARBAGE_ARGS;
+        }
+        m_host.log().info("nfsv3: UMNT \"{}\"", path);
+        return SUCCESS; // void result
+    }
+
+    uint32_t mountExport(Reader&, Writer& w) {
+        //  exportnode list: one entry "/" with no group restriction.
+        w.u32(1);   // value-follows
+        w.str("/"); // ex_dir
+        w.u32(0);   // ex_groups: none
+        w.u32(0);   // end of list
+        return SUCCESS;
     }
 
     IHost& m_host;
