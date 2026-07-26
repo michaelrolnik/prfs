@@ -32,6 +32,15 @@ foreach t : tests
     test(t[0], exe, timeout : t[2])
 endforeach
 
+#   DI registry is header-only (include/prfs/di.hpp) — links only gtest.
+test_di = executable(
+    'test_di',
+    'di/di_test.cpp',
+    include_directories : [test_inc, prfs_inc],
+    dependencies        : [gtest_dep],
+)
+test('di', test_di, timeout : 30)
+
 #   Content provider is a standalone leaf — links only prfs-content + gtest.
 if get_option('content')
     test_content = executable(

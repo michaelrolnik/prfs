@@ -39,7 +39,7 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 | L2  | ⬜     | NFS front-ends as plugins: `nfsv3`, `mount`, `nfsv4` (under the L5 host)    |
 | L3  | ⬜     | GC / compaction: reclaim superseded link-set versions + unref content       |
 | L4  | ⬜     | Dedup-ratio stats (phase-2): content refcounting                            |
-| L5  | ⬜     | DI registry (di.md) + plugin host (plugins.md) — provide / resolve         |
+| L5  | 🚧     | DI registry (di.md) ✅ built · plugin host (plugins.md) next               |
 
 ---
 
@@ -85,5 +85,5 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 - **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis. Includes the T1 carve-outs: `..` via-parent resolution (filehandle-encoded ancestor chain) and directory-`nlink` reporting mode (POSIX-compat default / faithful). **Threading:** naive `rpcgen` dispatch is single-threaded (static buffers, one `svc_run`) — avoid it. Options: `rpcgen -M` (MT stubs), or generate **XDR only** + our own thread-pool TCP server (self-contained, full MT control), or a **Ganesha FSAL** (Ganesha owns RPC/threading; `IPrfs` is already FSAL-shaped — least protocol code). Decide at L2.
 - **L3** ⬜ — **GC / compaction**: reclaim superseded link-set versions + unreferenced `content`/`strings`.
 - **L4** ⬜ — **Dedup-ratio stats** (phase-2): content refcounting (`logicalSize` vs `physicalSize`).
-- **L5a** ⬜ — **DI registry** ([`docs/di.md`](di.md)): a typed C++ container keyed by `(interface-id, name)` — `provide`/`resolve`/`resolveAll`/`requireAllResolved`; fail-loud on unresolved; a `Registry` *is* a scope (RAII, for hermetic tests). A service-locator/DI pattern (named binding, names, fail-loud sentinel, RAII scopes) done typed/explicit — no `void*` vtables, no constructor macros, no dlopen/teardown machinery. `include/prfs/di.hpp`. The `rng` registry is its working prototype.
+- **L5a** ✅ — **DI registry** ([`docs/di.md`](di.md)): header-only `include/prfs/di.hpp` — typed container keyed by `(interface-id, name)`: `provide`/`resolve`/`tryResolve`/`resolveAll`/`withdraw`/`has`/`names`/`ids`/`require`/`requireAllResolved`, a `Register` self-registration helper, and a `global()` Meyers singleton. Fail-loud (`resolve` throws `Unresolved`); a `Registry` *is* a scope (RAII). `tests/di/di_test.cpp` (9 cases). Next: migrate `rng` onto it as the first real provider.
 - **L5b** ⬜ — **Plugin host** ([`docs/plugins.md`](plugins.md)) over the DI registry: versioned interfaces (`IFrontend`/`IRng`/`IStorageEngine`); a plugin **provides** its implementations into the registry (name = variant), the host **resolves** (`resolveAll<IFrontend>` → start; engine/rng by name). C++ interfaces + `extern "C"` ABI-versioned factory; loader = built-in providers + `dlopen` (+ `withdraw` on unload); front-ends add CLI args (`options()` → CLI11); CLI11+spdlog host layer; `null` test plugin. L2 NFS front-ends and the LMDB/mem engines and rng generators are all providers.

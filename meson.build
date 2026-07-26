@@ -172,6 +172,8 @@ fmt_files = files(
     'src/storage/lmdb/kv.cpp',
     'include/prfs/fsstat.hpp',
     'src/nfs/fsstat.cpp',
+    'include/prfs/di.hpp',
+    'tests/di/di_test.cpp',
     'include/prfs/rng.hpp',
     'src/rng/rng.cpp',
     'src/rng/philox.cpp',
