@@ -202,3 +202,55 @@ plugins/nfsv3/  …           real front-ends → <name>.so
 - **Interface catalogue.** Start with `IService`, `IRng`, `IStorageEngine`; likely follow-ons:
   content generator, auth, metrics. Each is just another ID.
 - **Config surface.** CLI11 flags vs config file vs both; per-plugin option namespacing.
+
+---
+
+## 8. In-tree service plugins
+
+Concrete `IService` providers shipped in `plugins/`, each built as `<name>.so`:
+
+| Plugin | di name | What `start()` does |
+|--------|---------|---------------------|
+| `nfsv3` | `nfsv3` | Binds the NFSv3 + MOUNT server (Asio coroutines, own io-thread pool). The real front-end. |
+| `luactl` | `luactl` | Opens a live Lua console on a unix socket (`--control`), `fs` bound to the running store. |
+| `bigtree` | `bigtree` | **Builds** a large synthetic tree into the store, then idles (serves no network). |
+| `null` | `null` | Reference/test: one scripted `IPrfs` op. Skipped by the default plugin scan. |
+
+**`bigtree` — the native store-builder.** The C++ twin of `examples/bigtree.lua`:
+the same irregular-but-reproducible tree (per-level random counts of
+files/subdirs/hardlinks/symlinks, heavy-tailed random file sizes normalized to a
+target total, a base snapshot plus daily rounds), built by calling `IPrfs`
+directly instead of through the Lua interpreter — so a multi-TiB tree builds in a
+fraction of the time. It takes the store's exclusive lock for the bulk build,
+and builds only into an **empty** store unless `bigtree.force` is set (so a
+restart re-serves rather than rebuilds). Options (via `--set`, below):
+`bigtree.total` (K/M/G/T/P suffix), `.depth`, `.dirs`, `.files`, `.seed`,
+`.snapshots`, `.force`. It sets a filesystem-wide content policy only when
+content is compiled (`-Dcontent`, linking `prfs_content_dep`). Because services
+`start()` in registration (load) order, list `bigtree` **before** `nfsv3` so the
+tree exists before the first client connects:
+
+```
+prfs-host --store /tmp/prfs-big --clean \
+  --plugin bigtree.so --plugin nfsv3.so --port 20490 \
+  --set bigtree.total=1T --set bigtree.seed=42
+```
+
+**Passing plugin options — `--set KEY=VALUE`.** Beyond the host's own flags,
+`prfs-host --set KEY=VALUE` (repeatable) writes straight into `IHost::option()`,
+so any plugin option is settable from the CLI without the host knowing about it
+(`--set bigtree.total=1T`, `--set note=hi`). A plugin reads it with
+`host.option("bigtree.total")` and advertises it via `IService::options()` for
+discoverability.
+
+### Gotcha: client page cache vs. generated content
+
+prfs **generates** file content from a per-file seed and **stores no bytes**: a
+WRITE folds `(offset, data)` into the seed (`nfsv3.cpp` → `setContentSeed`), and
+a READ regenerates from it (`Host::read`). So `echo hi > f; cat f` over a mount
+returning `hi` is **not** prfs storing your bytes — the Linux NFS client served
+the `cat` from its own page cache (close-to-open caching), never reaching the
+server. To observe the real (generated) content of the written length, bypass
+the client cache: `dd if=f iflag=direct bs=512 count=1 | xxd`, or drop caches
+(`echo 3 | sudo tee /proc/sys/vm/drop_caches`) then `cat`, or mount `-o noac`.
+This is inherent to any NFS client, not a prfs defect.
