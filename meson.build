@@ -180,6 +180,8 @@ if get_option('plugins')
     cpp = meson.get_compiler('cpp')
     spdlog_inc = include_directories('third_party/spdlog/include', is_system : true)
     cli11_inc = include_directories('third_party/CLI11/include', is_system : true)
+    #   Standalone Asio (header-only, no Boost) — the nfsv3 service's socket I/O.
+    asio_inc = include_directories('third_party/asio/asio/include', is_system : true)
     dl_dep = cpp.find_library('dl', required : false)
     threads_dep = dependency('threads')
 
@@ -212,12 +214,13 @@ if get_option('plugins')
         name_prefix         : '',
     )
 
-    #   nfsv3 front-end service (→ nfsv3.so). Sockets + threads + spdlog.
+    #   nfsv3 front-end service (→ nfsv3.so). Asio coroutines + threads + spdlog.
     nfsv3_so = shared_module(
         'nfsv3',
         'plugins/nfsv3/nfsv3.cpp',
-        include_directories : [prfs_inc, spdlog_inc],
+        include_directories : [prfs_inc, spdlog_inc, asio_inc],
         override_options    : ['warning_level=0'],
+        cpp_args            : ['-DASIO_STANDALONE'],
         name_prefix         : '',
         dependencies        : [threads_dep],
     )

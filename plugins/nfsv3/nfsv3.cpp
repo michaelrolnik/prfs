@@ -2,9 +2,9 @@
 // Copyright (c) 2026 Michael Rolnik <mrolnik@gmail.com>
 
 //
-//  nfsv3 — an NFSv3 front-end as a prfs service plugin (todo L2). A TCP server
-//  (its own thread) that speaks ONC-RPC record marking and dispatches, on the
-//  one listener, both the MOUNT program (100005 v3: MNT/UMNT/EXPORT) and the NFS
+//  nfsv3 — an NFSv3 front-end as a prfs service plugin (todo L2). An Asio TCP
+//  server that speaks ONC-RPC record marking and dispatches, on the one
+//  listener, both the MOUNT program (100005 v3: MNT/UMNT/EXPORT) and the NFS
 //  program (100003 v3). Implemented so far: MOUNT MNT hands out the root
 //  filehandle for the single export "/"; NFS NULL, GETATTR, LOOKUP, ACCESS let a
 //  client walk the tree and stat nodes. Remaining NFS procedures (READ, READDIR,
@@ -15,22 +15,23 @@
 //  Keeping snapId in the fh means a handle taken against a snapshot keeps reading
 //  that frozen view, while LATEST fh's track the live tree.
 //
-//  Threading note (docs L2): one accept+serve thread for now — a thread pool is
-//  the next step. Port comes from the "port" option (default 2049; 2049 needs
+//  I/O model (standalone Asio, coroutines): one io_context driven by a pool of
+//  threads (sized to the hardware). A listener coroutine accepts connections; a
+//  per-connection coroutine reads record-marked calls, dispatches, and writes
+//  the reply. Dispatch itself is synchronous CPU work (XDR + content RNG), so it
+//  runs inline on the io thread — the thread pool is what gives us core
+//  parallelism. Port comes from the "port" option (default 2049; 2049 needs
 //  privileges, so tests use a high port).
 //
 #include "prfs/plugin.hpp"
 
+#include <asio.hpp>
 #include <spdlog/spdlog.h>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +39,7 @@
 namespace {
 using namespace prfs;
 using namespace prfs::plugin;
+using asio::ip::tcp;
 
 //  ONC-RPC (RFC 5531) message + accept_stat constants.
 constexpr uint32_t RPC_CALL = 0, RPC_REPLY = 1;
@@ -65,32 +67,6 @@ constexpr uint32_t NFS3_OK = 0, NFS3ERR_NOENT = 2, NFS3ERR_NOTDIR = 20, NFS3ERR_
 
 //  access3 bits — what this synthetic (read-mostly) target grants.
 constexpr uint32_t ACCESS3_READ = 0x0001, ACCESS3_LOOKUP = 0x0002, ACCESS3_EXECUTE = 0x0020;
-
-bool recvAll(int fd, void* buf, size_t n) {
-    auto* p = static_cast<char*>(buf);
-    while (n) {
-        ssize_t r = ::recv(fd, p, n, 0);
-        if (r <= 0) {
-            return false;
-        }
-        p += r;
-        n -= size_t(r);
-    }
-    return true;
-}
-
-bool sendAll(int fd, void const* buf, size_t n) {
-    auto* p = static_cast<char const*>(buf);
-    while (n) {
-        ssize_t r = ::send(fd, p, n, MSG_NOSIGNAL);
-        if (r <= 0) {
-            return false;
-        }
-        p += r;
-        n -= size_t(r);
-    }
-    return true;
-}
 
 uint32_t rd32(uint8_t const* p) {
     return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | uint32_t(p[3]);
@@ -204,25 +180,10 @@ struct Writer {
     }
 };
 
-//  prfs Type → NFSv3 ftype3.
+//  prfs Type → NFSv3 ftype3, indexed by Type (REG,DIR,LNK,BLK,CHR,FIFO,SOCK).
 uint32_t ftype3(Type t) {
-    switch (t) {
-    case Type::REG:
-        return 1;
-    case Type::DIR:
-        return 2;
-    case Type::BLK:
-        return 3;
-    case Type::CHR:
-        return 4;
-    case Type::LNK:
-        return 5;
-    case Type::SOCK:
-        return 6;
-    case Type::FIFO:
-        return 7;
-    }
-    return 1;
+    static constexpr uint32_t kFtype3[] = {1, 2, 5, 3, 4, 7, 6};
+    return kFtype3[size_t(t)];
 }
 
 void encodeFattr(Writer& w, INode& n) {
@@ -273,28 +234,27 @@ public:
         std::string ps = m_host.option("port");
         int port = ps.empty() ? 2049 : std::atoi(ps.c_str());
 
-        m_listen = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (m_listen < 0) {
+        try {
+            m_ctx.restart(); // reusable after a prior stop()
+            m_acc.emplace(m_ctx);
+            m_acc->open(tcp::v4());
+            m_acc->set_option(asio::socket_base::reuse_address(true)); // before bind
+            m_acc->bind(tcp::endpoint(tcp::v4(), uint16_t(port)));
+            m_acc->listen();
+        } catch (std::exception const& e) {
+            m_host.log().error("nfsv3: bind/listen on port {} failed: {}", port, e.what());
+            m_acc.reset();
             return Error::INVAL;
         }
-        int on = 1;
-        ::setsockopt(m_listen, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
-        addr.sin_port = htons(uint16_t(port));
-        if (::bind(m_listen, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0 ||
-            ::listen(m_listen, 16) < 0) {
-            m_host.log().error("nfsv3: bind/listen on port {} failed", port);
-            ::close(m_listen);
-            m_listen = -1;
-            return Error::INVAL;
-        }
+        asio::co_spawn(m_ctx, listener(), asio::detached);
 
         m_running = true;
-        m_thread = std::thread([this] { serve(); });
-        m_host.log().info("nfsv3: serving on port {}", port);
+        unsigned n = std::max(2u, std::thread::hardware_concurrency());
+        for (unsigned i = 0; i < n; ++i) {
+            m_threads.emplace_back([this] { m_ctx.run(); });
+        }
+        m_host.log().info("nfsv3: serving on port {} ({} io threads)", port, n);
         return Error::OK;
     }
 
@@ -302,60 +262,61 @@ public:
         if (!m_running.exchange(false)) {
             return;
         }
-        if (m_listen >= 0) {
-            ::shutdown(m_listen, SHUT_RDWR); // break accept()
-            ::close(m_listen);
-            m_listen = -1;
+        m_ctx.stop(); // unblock run() on every io thread
+        for (auto& t : m_threads) {
+            if (t.joinable()) {
+                t.join();
+            }
         }
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
+        m_threads.clear();
+        m_acc.reset();
     }
 
 private:
-    void serve() {
-        while (m_running) {
-            int c = ::accept(m_listen, nullptr, nullptr);
-            if (c < 0) {
-                break; // listen fd closed by stop()
+    //  Accept connections until the acceptor is closed (by stop()).
+    asio::awaitable<void> listener() {
+        try {
+            for (;;) {
+                tcp::socket sock = co_await m_acc->async_accept(asio::use_awaitable);
+                asio::co_spawn(m_ctx, session(std::move(sock)), asio::detached);
             }
-            handle(c);
-            ::close(c);
+        } catch (std::exception const&) {
+            // acceptor closed on shutdown — stop accepting
         }
     }
 
     //  Serve one connection: read record-marked RPC messages, reply to each.
-    void handle(int c) {
-        for (;;) {
-            uint8_t mark[4];
-            if (!recvAll(c, mark, 4)) {
-                return;
-            }
-            uint32_t len = rd32(mark) & 0x7fffffff; // one fragment per message for now
-            if (len < 24 || len > (1u << 20)) {
-                return;
-            }
-            std::vector<uint8_t> msg(len);
-            if (!recvAll(c, msg.data(), len)) {
-                return;
-            }
+    //  Locals (mark, msg, frame) live across each co_await in the coroutine
+    //  frame, so their buffers stay valid for the async op.
+    asio::awaitable<void> session(tcp::socket sock) {
+        try {
+            for (;;) {
+                uint8_t mark[4];
+                co_await asio::async_read(sock, asio::buffer(mark, 4), asio::use_awaitable);
+                uint32_t len = rd32(mark) & 0x7fffffff; // one fragment per message for now
+                if (len < 24 || len > (1u << 20)) {
+                    co_return;
+                }
+                std::vector<uint8_t> msg(len);
+                co_await asio::async_read(sock, asio::buffer(msg), asio::use_awaitable);
 
-            Reader r{msg.data(), msg.size()};
-            uint32_t xid = r.u32();
-            if (r.u32() != RPC_CALL) {
-                return;
-            }
-            r.u32(); // rpcvers (assume 2)
-            uint32_t prog = r.u32();
-            uint32_t vers = r.u32();
-            uint32_t proc = r.u32();
-            r.skipAuth(); // cred
-            r.skipAuth(); // verf
+                Reader r{msg.data(), msg.size()};
+                uint32_t xid = r.u32();
+                if (r.u32() != RPC_CALL) {
+                    co_return;
+                }
+                r.u32(); // rpcvers (assume 2)
+                uint32_t prog = r.u32();
+                uint32_t vers = r.u32();
+                uint32_t proc = r.u32();
+                r.skipAuth(); // cred
+                r.skipAuth(); // verf
 
-            std::vector<uint8_t> frame = reply(xid, prog, vers, proc, r);
-            if (!sendAll(c, frame.data(), frame.size())) {
-                return;
+                std::vector<uint8_t> frame = reply(xid, prog, vers, proc, r);
+                co_await asio::async_write(sock, asio::buffer(frame), asio::use_awaitable);
             }
+        } catch (std::exception const&) {
+            // client closed or read/write error — end the session
         }
     }
 
@@ -527,9 +488,10 @@ private:
     }
 
     IHost& m_host;
-    int m_listen = -1;
+    asio::io_context m_ctx;
+    std::optional<tcp::acceptor> m_acc;
+    std::vector<std::thread> m_threads;
     std::atomic<bool> m_running{false};
-    std::thread m_thread;
 };
 
 class NfsV3Plugin : public IPlugin {
