@@ -4,10 +4,10 @@
 //
 //  nfsv3 plugin — end-to-end RPC test. Loads nfsv3.so via the host, then over a
 //  TCP connection walks the real client flow: MOUNT MNT to obtain the root
-//  filehandle, then NFS GETATTR/LOOKUP/ACCESS/READ/READDIR/READDIRPLUS/FSSTAT/
-//  FSINFO against the live store the host wraps. Proves the transport (record
-//  marking + call/reply) and the XDR / filehandle mapping. NFSV3_PLUGIN_SO is
-//  the .so path.
+//  filehandle, then the read-only NFS surface (GETATTR/LOOKUP/ACCESS/READ/
+//  READLINK/READDIR/READDIRPLUS/FSSTAT/FSINFO/PATHCONF) against the live store
+//  the host wraps. Proves the transport (record marking + call/reply) and the
+//  XDR / filehandle mapping. NFSV3_PLUGIN_SO is the .so path.
 //
 #include "prfs/host.hpp"
 #include "prfs/memstore.hpp"
@@ -150,8 +150,11 @@ TEST(NfsV3, MountWalkStat) {
     auto file = fs->mkfile("hi there");
     file->size(8);
     ASSERT_EQ(fs->link(root, "hello", file), Error::OK);
+    auto lnk = fs->symlink("/target/path");
+    ASSERT_EQ(fs->link(root, "lnk", lnk), Error::OK);
     uint64_t rootId = root->id();
     uint64_t fileId = file->id();
+    uint64_t lnkId = lnk->id();
 
     auto log = quietLogger();
     host::Host h(*fs, *log, reg);
@@ -269,13 +272,14 @@ TEST(NfsV3, MountWalkStat) {
             o += 8; // cookie
         }
         EXPECT_EQ(get32(&dd.body[o + 4]), 1u); // eof
-        EXPECT_EQ(names.size(), 3u);
+        EXPECT_EQ(names.size(), 4u);
         EXPECT_NE(std::find(names.begin(), names.end(), "."), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), ".."), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), "hello"), names.end());
+        EXPECT_NE(std::find(names.begin(), names.end(), "lnk"), names.end());
     }
 
-    //  READDIR resuming after cookie 2 (past "." and "..") → just "hello".
+    //  READDIR resuming after cookie 2 (past "." and "..") → the real entries.
     std::vector<uint8_t> ddArgs2 = fhArg(fhId, fhSnap);
     putU64(ddArgs2, 2);
     putU64(ddArgs2, 0);
@@ -291,7 +295,7 @@ TEST(NfsV3, MountWalkStat) {
             o += 8;
             ++n;
         }
-        EXPECT_EQ(n, 1); // only "hello" remains
+        EXPECT_EQ(n, 2); // "hello" and "lnk" remain
     }
 
     //  READDIRPLUS: like READDIR but each entry carries name_attributes
@@ -335,9 +339,25 @@ TEST(NfsV3, MountWalkStat) {
             ++n;
         }
         EXPECT_EQ(get32(&dp.body[o + 4]), 1u); // eof
-        EXPECT_EQ(n, 3);
+        EXPECT_EQ(n, 4);
         EXPECT_TRUE(sawHello);
     }
+
+    //  READLINK the symlink → its target string (after status + post_op_attr).
+    Reply rl = rpc(fd, PROG_NFS, NFS_V3, 5, fhArg(lnkId, fhSnap));
+    ASSERT_EQ(rl.astat, 0u);
+    EXPECT_EQ(get32(&rl.body[0]), 0u);   // NFS3_OK
+    EXPECT_EQ(get32(&rl.body[92]), 12u); // nfspath3 length ("/target/path")
+    EXPECT_EQ(std::string(reinterpret_cast<char const*>(&rl.body[96]), 12), "/target/path");
+
+    //  READLINK a non-symlink → NFS3ERR_INVAL (22).
+    EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 5, fhArg(childId, childSnap)).body[0]), 22u);
+
+    //  PATHCONF: obj_attr then linkmax, name_max, and the four booleans.
+    Reply pc = rpc(fd, PROG_NFS, NFS_V3, 20, fhArg(fhId, fhSnap));
+    ASSERT_EQ(pc.astat, 0u);
+    EXPECT_EQ(get32(&pc.body[0]), 0u);    // NFS3_OK
+    EXPECT_EQ(get32(&pc.body[96]), 255u); // name_max
 
     //  FSSTAT: obj_attr then the six size3 counters + invarsec. tbytes is the
     //  advertised capacity (FsConfig default, 1 TiB).

@@ -8,10 +8,10 @@
 //  program (100003 v3). Implemented so far: MOUNT MNT hands out the root
 //  filehandle for the single export "/"; NFS NULL, GETATTR, LOOKUP, ACCESS let a
 //  client walk the tree and stat nodes, READ returns file bytes (sourced by the
-//  host — procedural content or literal), READDIR/READDIRPLUS list directories
-//  (with synthesized "." and ".."), and FSSTAT/FSINFO report volume usage and
-//  server parameters (the libprfs_nfs §9 projection). Remaining procedures
-//  (READLINK, PATHCONF, …) build on the same dispatch.
+//  host — procedural content or literal), READLINK returns a symlink target,
+//  READDIR/READDIRPLUS list directories (with synthesized "." and ".."), and
+//  FSSTAT/FSINFO/PATHCONF report volume usage, server parameters, and limits
+//  (the libprfs_nfs §9 projection). This covers the read-only NFSv3 surface.
 //
 //  Filehandle (nfs_fh3): 16 opaque bytes = big-endian (nodeID, snapId). Decoded
 //  back to a node via IPrfs::nodeById(); a null result maps to NFS3ERR_STALE.
@@ -54,15 +54,20 @@ constexpr uint32_t SUCCESS = 0, PROG_UNAVAIL = 1, PROG_MISMATCH = 2, PROC_UNAVAI
 //  NFSv3 program (RFC 1813).
 constexpr uint32_t PROG_NFS = 100003;
 constexpr uint32_t NFS_V3 = 3;
-constexpr uint32_t NFSPROC3_NULL = 0, NFSPROC3_GETATTR = 1, NFSPROC3_LOOKUP = 3,
-                   NFSPROC3_ACCESS = 4, NFSPROC3_READ = 6, NFSPROC3_READDIR = 16,
-                   NFSPROC3_READDIRPLUS = 17, NFSPROC3_FSSTAT = 18, NFSPROC3_FSINFO = 19;
+constexpr uint32_t NFSPROC3_NULL = 0, NFSPROC3_GETATTR = 1, NFSPROC3_READLINK = 5,
+                   NFSPROC3_LOOKUP = 3, NFSPROC3_ACCESS = 4, NFSPROC3_READ = 6,
+                   NFSPROC3_READDIR = 16, NFSPROC3_READDIRPLUS = 17, NFSPROC3_FSSTAT = 18,
+                   NFSPROC3_FSINFO = 19, NFSPROC3_PATHCONF = 20;
 
 //  Largest READ we answer in one reply (also the rtmax FSINFO will advertise).
 constexpr uint32_t MAX_READ = 1u << 20;
 
 //  cookieverf3 is a fixed 8-byte opaque array (no length prefix).
 constexpr size_t NFS3_COOKIEVERFSIZE = 8;
+
+//  PATHCONF policy this synthetic target reports.
+constexpr uint32_t PATHCONF_LINKMAX = 0xFFFF; // max hard links
+constexpr uint32_t PATHCONF_NAMEMAX = 255;    // max filename length
 
 //  MOUNT program (RFC 1813 appendix I) — v3 only. NFSv4 dropped MOUNT entirely
 //  (PUTROOTFH inside COMPOUND replaces it), so this lives with nfsv3, not apart.
@@ -424,6 +429,8 @@ private:
             return SUCCESS; // empty result
         case NFSPROC3_GETATTR:
             return nfsGetattr(r, w);
+        case NFSPROC3_READLINK:
+            return nfsReadlink(r, w);
         case NFSPROC3_LOOKUP:
             return nfsLookup(r, w);
         case NFSPROC3_ACCESS:
@@ -438,6 +445,8 @@ private:
             return nfsFsstat(r, w);
         case NFSPROC3_FSINFO:
             return nfsFsinfo(r, w);
+        case NFSPROC3_PATHCONF:
+            return nfsPathconf(r, w);
         default:
             m_host.log().info("nfsv3: unimplemented NFS proc {}", proc);
             return PROC_UNAVAIL;
@@ -456,6 +465,27 @@ private:
         }
         w.u32(NFS3_OK);
         encodeFattr(w, *n);
+        return SUCCESS;
+    }
+
+    uint32_t nfsReadlink(Reader& r, Writer& w) {
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        Node n = m_host.fs().nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        if (n->type() != Type::LNK) {
+            w.u32(NFS3ERR_INVAL);
+            encodePostOp(w, n.get());
+            return SUCCESS;
+        }
+        w.u32(NFS3_OK);
+        encodePostOp(w, n.get()); // symlink_attributes
+        w.str(n->target());       // nfspath3 data
         return SUCCESS;
     }
 
@@ -707,6 +737,27 @@ private:
         w.u32(fi.timeDeltaSec);
         w.u32(fi.timeDeltaNsec);
         w.u32(fi.properties);
+        return SUCCESS;
+    }
+
+    uint32_t nfsPathconf(Reader& r, Writer& w) {
+        uint64_t id, snap;
+        if (!r.fh(id, snap)) {
+            return GARBAGE_ARGS;
+        }
+        Node n = m_host.fs().nodeById(id, snap);
+        if (!n) {
+            w.u32(NFS3ERR_STALE);
+            return SUCCESS;
+        }
+        w.u32(NFS3_OK);
+        encodePostOp(w, n.get()); // obj_attributes
+        w.u32(PATHCONF_LINKMAX);  // linkmax
+        w.u32(PATHCONF_NAMEMAX);  // name_max
+        w.u32(1);                 // no_trunc — over-long names error, not truncate
+        w.u32(1);                 // chown_restricted
+        w.u32(0);                 // case_insensitive
+        w.u32(1);                 // case_preserving
         return SUCCESS;
     }
 
