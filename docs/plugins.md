@@ -105,7 +105,7 @@ struct IFrontend {
 struct IRng {
     static constexpr std::string_view ID = "prfs.rng/1";
     virtual ~IRng() = default;
-    virtual void gen4(uint32_t const ctr[4], uint32_t const key[2], uint32_t out[4]) const = 0;
+    virtual void generate(uint32_t const ctr[4], uint32_t const key[2], uint32_t out[4]) const = 0;
 };
 
 //  A storage engine behind IKvStore. The di name is the engine, "lmdb" / "memory".

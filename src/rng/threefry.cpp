@@ -18,7 +18,7 @@ namespace prfs::rng {
 //  internal linkage. Everything that can be `static` (the objects below) is.
 namespace {
 struct Threefry : IRng {
-    void gen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) const override {
+    void generate(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) const override {
         threefry4x32_ctr_t ctr = {{c[0], c[1], c[2], c[3]}};
         threefry4x32_key_t key = {{k[0], k[1], 0, 0}};
         threefry4x32_ctr_t r = threefry4x32(ctr, key);

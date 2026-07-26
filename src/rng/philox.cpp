@@ -16,7 +16,7 @@ namespace prfs::rng {
 //  internal linkage. Everything that can be `static` (the objects below) is.
 namespace {
 struct Philox : IRng {
-    void gen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) const override {
+    void generate(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) const override {
         philox4x32_ctr_t ctr = {{c[0], c[1], c[2], c[3]}};
         philox4x32_key_t key = {{k[0], k[1]}};
         philox4x32_ctr_t r = philox4x32(ctr, key);

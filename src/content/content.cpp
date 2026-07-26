@@ -81,7 +81,7 @@ static void genBlock(ContentConfig const& c, uint64_t seed, uint64_t b, int K, r
     for (uint32_t off = 0, g = 0; off < bs; off += 16, ++g) {
         uint32_t ctr[4] = {bl, bh, g, 0};
         uint32_t out[4];
-        gen.gen4(ctr, key, out);
+        gen.generate(ctr, key, out);
         for (uint32_t i = 0; i < 16 && off + i < bs; ++i) {
             uint8_t raw = uint8_t(out[i / 4] >> (8 * (i % 4)));
             buf[off + i] = char(mapByte(raw, K));
