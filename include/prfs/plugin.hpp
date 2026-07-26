@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,7 +27,7 @@ class logger;
 namespace prfs::plugin {
 
 //  Bump on ANY change to the interfaces below; the loader refuses a mismatch.
-inline constexpr uint32_t ABI = 1;
+inline constexpr uint32_t ABI = 2;
 
 //  Services the host lends every plugin, plus the shared di registry.
 class IHost {
@@ -38,6 +39,13 @@ public:
     virtual size_t read(Node file, uint64_t off, char* out, size_t len) = 0; // file bytes
     virtual spdlog::logger& log() = 0;                                       // shared logger
     virtual std::string option(std::string_view key) const = 0;              // parsed CLI/config
+
+    //  Serializes access to the shared store across services. The store is not
+    //  internally locked, so every service must guard its fs() access: take a
+    //  shared_lock for read-only ops (they run concurrently) and a unique_lock
+    //  for any mutation (single-writer). READ content generation is CPU-bound
+    //  but read-only, so it parallelizes under the shared lock.
+    virtual std::shared_mutex& storeMutex() = 0;
 };
 
 //  A loaded plugin's owning root: identity + the objects it provided. create()

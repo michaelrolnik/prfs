@@ -227,6 +227,21 @@ if get_option('plugins')
         dependencies        : [threads_dep, prfs_nfs_dep],
     )
 
+    #   luactl — live Lua console over a unix socket (→ luactl.so). Reuses the
+    #   sol2 bindings; only built alongside the Lua layer (-Dlua). prfs_lua_dep is
+    #   linked into the module so registerLua + sol2 + lua are self-contained.
+    luactl_so = disabler()
+    if get_option('lua')
+        luactl_so = shared_module(
+            'luactl',
+            'plugins/luactl/luactl.cpp',
+            include_directories : [prfs_inc, spdlog_inc],
+            override_options    : ['warning_level=0'],
+            name_prefix         : '',
+            dependencies        : [prfs_lua_dep, threads_dep],
+        )
+    endif
+
     executable(
         'prfs-host',
         'src/host/main.cpp',
@@ -268,8 +283,10 @@ fmt_files = files(
     'src/host/main.cpp',
     'plugins/null/null.cpp',
     'plugins/nfsv3/nfsv3.cpp',
+    'plugins/luactl/luactl.cpp',
     'tests/host/host_test.cpp',
     'tests/nfsv3/nfsv3_test.cpp',
+    'tests/luactl/luactl_test.cpp',
     'tests/support.hpp',
     'tests/core/clock.cpp',
     'tests/core/contract.cpp',

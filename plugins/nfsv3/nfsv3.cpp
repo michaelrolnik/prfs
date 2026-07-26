@@ -41,7 +41,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -516,14 +518,7 @@ private:
     std::vector<uint8_t> reply(uint32_t xid, uint32_t prog, uint32_t vers, uint32_t proc,
                                Cred const& cred, Reader& r) {
         std::vector<uint8_t> result; // proc result, appended only on SUCCESS
-        uint32_t astat;
-        if (prog == PROG_NFS) {
-            astat = vers == NFS_V3 ? nfsCall(proc, cred, r, result) : PROG_MISMATCH;
-        } else if (prog == PROG_MOUNT) {
-            astat = vers == MOUNT_V3 ? mountCall(proc, r, result) : PROG_MISMATCH;
-        } else {
-            astat = PROG_UNAVAIL;
-        }
+        uint32_t astat = dispatch(prog, vers, proc, cred, r, result);
 
         std::vector<uint8_t> rep;
         Writer w{rep};
@@ -544,6 +539,47 @@ private:
         fw.u32(0x80000000u | uint32_t(rep.size())); // last fragment
         frame.insert(frame.end(), rep.begin(), rep.end());
         return frame;
+    }
+
+    //  NFS procedures that mutate the store (need the exclusive store lock).
+    static bool isMutating(uint32_t proc) {
+        switch (proc) {
+        case NFSPROC3_SETATTR:
+        case NFSPROC3_WRITE:
+        case NFSPROC3_CREATE:
+        case NFSPROC3_MKDIR:
+        case NFSPROC3_SYMLINK:
+        case NFSPROC3_MKNOD:
+        case NFSPROC3_REMOVE:
+        case NFSPROC3_RMDIR:
+        case NFSPROC3_RENAME:
+        case NFSPROC3_LINK:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    //  Run one call under the host's store lock: exclusive for a mutation,
+    //  shared for everything else (reads — incl. content generation — run
+    //  concurrently). Returns the RPC accept_stat.
+    uint32_t dispatch(uint32_t prog, uint32_t vers, uint32_t proc, Cred const& cred, Reader& r,
+                      std::vector<uint8_t>& result) {
+        auto run = [&]() -> uint32_t {
+            if (prog == PROG_NFS) {
+                return vers == NFS_V3 ? nfsCall(proc, cred, r, result) : PROG_MISMATCH;
+            }
+            if (prog == PROG_MOUNT) {
+                return vers == MOUNT_V3 ? mountCall(proc, r, result) : PROG_MISMATCH;
+            }
+            return PROG_UNAVAIL;
+        };
+        if (prog == PROG_NFS && isMutating(proc)) {
+            std::unique_lock<std::shared_mutex> lk(m_host.storeMutex());
+            return run();
+        }
+        std::shared_lock<std::shared_mutex> lk(m_host.storeMutex());
+        return run();
     }
 
     //  Dispatch one NFS procedure. Returns the RPC accept_stat; on SUCCESS the

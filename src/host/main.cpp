@@ -75,6 +75,7 @@ int main(int argc, char** argv) {
     std::string engine;
     bool clean = false;
     int port = 0;
+    std::string control;
     std::vector<std::string> plugins;
     std::vector<std::string> pluginDirs;
 
@@ -82,6 +83,7 @@ int main(int argc, char** argv) {
     app.add_flag("--clean", clean, "wipe the store on open");
     app.add_option("--engine", engine, "storage engine (di name): lmdb | memory");
     app.add_option("--port", port, "TCP port for NFS/MOUNT services (default 2049)");
+    app.add_option("--control", control, "unix socket path for the luactl Lua console");
     app.add_option("--plugin", plugins, "front-end plugin .so to load")->expected(-1);
     app.add_option("--plugin-dir", pluginDirs, "directory to scan for *.so plugins")->expected(-1);
     CLI11_PARSE(app, argc, argv);
@@ -99,6 +101,9 @@ int main(int argc, char** argv) {
         prfs::host::Host host(*fs, *log);
         if (port != 0) {
             host.setOption("port", std::to_string(port));
+        }
+        if (!control.empty()) {
+            host.setOption("control", control);
         }
         prfs::host::Loader loader(host);
         for (std::string const& p : plugins) {

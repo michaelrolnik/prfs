@@ -243,36 +243,37 @@ void registerLua(sol::state_view lua) {
             return std::make_tuple(p.first, p.second);
         });
 
-    lua.new_usertype<IPrfs>(                    //
-        "IPrfs", sol::no_constructor,           //
-        "root", &IPrfs::rwRoot,                 //
-        "snapshotRoot", &IPrfs::snapshotRoot,   //
-        "snapshots", &snapshotsLua,             //
-        "snapInfo", &snapInfoLua,               //
-        "mkdir", &IPrfs::mkdir,                 //
-        "mkfile", &IPrfs::mkfile,               //
-        "symlink", &IPrfs::symlink,             //
-        "mknod", &IPrfs::mknod,                 //
-        "mkfifo", &IPrfs::mkfifo,               //
-        "mksock", &IPrfs::mksock,               //
-        "lookup", &IPrfs::lookup,               //
-        "link", &IPrfs::link,                   //
-        "unlink", &IPrfs::unlink,               //
-        "move", &IPrfs::move,                   //
-        "setContent", &IPrfs::setContent,       //
-        "setTarget", &IPrfs::setTarget,         //
-        "setRdev", &IPrfs::setRdev,             //
-        "readdir", &readdirLua,                 //
-        "readdirPage", &readdirPageLua,         //
-        "parents", &parentsLua,                 //
-        "now", &IPrfs::now,                     //
-        "setTime", &IPrfs::setTime,             //
-        "snapshot", &snapshotLua,               //
-        "diffNodes", &diffNodesLua,             //
-        "diffPaths", &diffPathsLua,             //
-        "stats", &statsLua,                     //
-        "fsStat", &fsStatLua,                   //
-        "contentConfig", &IPrfs::contentConfig, //
+    lua.new_usertype<IPrfs>(                      //
+        "IPrfs", sol::no_constructor,             //
+        "root", &IPrfs::rwRoot,                   //
+        "snapshotRoot", &IPrfs::snapshotRoot,     //
+        "snapshots", &snapshotsLua,               //
+        "snapInfo", &snapInfoLua,                 //
+        "mkdir", &IPrfs::mkdir,                   //
+        "mkfile", &IPrfs::mkfile,                 //
+        "symlink", &IPrfs::symlink,               //
+        "mknod", &IPrfs::mknod,                   //
+        "mkfifo", &IPrfs::mkfifo,                 //
+        "mksock", &IPrfs::mksock,                 //
+        "lookup", &IPrfs::lookup,                 //
+        "link", &IPrfs::link,                     //
+        "unlink", &IPrfs::unlink,                 //
+        "move", &IPrfs::move,                     //
+        "setContent", &IPrfs::setContent,         //
+        "setContentSeed", &IPrfs::setContentSeed, //
+        "setTarget", &IPrfs::setTarget,           //
+        "setRdev", &IPrfs::setRdev,               //
+        "readdir", &readdirLua,                   //
+        "readdirPage", &readdirPageLua,           //
+        "parents", &parentsLua,                   //
+        "now", &IPrfs::now,                       //
+        "setTime", &IPrfs::setTime,               //
+        "snapshot", &snapshotLua,                 //
+        "diffNodes", &diffNodesLua,               //
+        "diffPaths", &diffPathsLua,               //
+        "stats", &statsLua,                       //
+        "fsStat", &fsStatLua,                     //
+        "contentConfig", &IPrfs::contentConfig,   //
         "setContentConfig", &IPrfs::setContentConfig);
 
     t["open"] = &luaOpen;

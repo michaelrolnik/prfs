@@ -59,6 +59,18 @@ if get_option('plugins')
         dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
     )
     test('nfsv3', test_nfsv3, depends : nfsv3_so, timeout : 60)
+
+    if get_option('lua')
+        test_luactl = executable(
+            'test_luactl',
+            'luactl/luactl_test.cpp',
+            include_directories : [test_inc, prfs_inc, spdlog_inc],
+            override_options    : ['warning_level=0'],
+            cpp_args            : ['-DLUACTL_PLUGIN_SO="' + luactl_so.full_path() + '"'],
+            dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
+        )
+        test('luactl', test_luactl, depends : luactl_so, timeout : 60)
+    endif
 endif
 
 #   DI registry is header-only (include/prfs/di.hpp) — links only gtest.

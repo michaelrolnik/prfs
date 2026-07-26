@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <map>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,8 @@ public:
 
     std::string option(std::string_view key) const override;
 
+    std::shared_mutex& storeMutex() override { return m_storeMutex; }
+
     void setOption(std::string key, std::string value); // loader/CLI fills these
 
 private:
@@ -44,6 +47,7 @@ private:
     spdlog::logger& m_log;
     di::Registry& m_reg;
     std::map<std::string, std::string, std::less<>> m_options;
+    std::shared_mutex m_storeMutex;
 };
 
 //  Loads plugins and owns their lifetimes. Not thread-safe (bootstrap only).
