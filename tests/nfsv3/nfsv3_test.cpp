@@ -145,7 +145,6 @@ Reply rpc(int fd, uint32_t prog, uint32_t vers, uint32_t proc, std::vector<uint8
 TEST(NfsV3, MountWalkStat) {
     const int port = 34567;
 
-    di::Registry reg;
     auto fs = makeMemStore();
     auto root = fs->rwRoot();
     auto file = fs->mkfile("hi there");
@@ -159,7 +158,7 @@ TEST(NfsV3, MountWalkStat) {
     uint64_t lnkId = lnk->id();
 
     auto log = quietLogger();
-    host::Host h(*fs, *log, reg);
+    host::Host h(*fs, *log); // di::global(): engines, rng, and content live here
     h.setOption("port", std::to_string(port));
 
     host::Loader loader(h);
@@ -222,7 +221,9 @@ TEST(NfsV3, MountWalkStat) {
     EXPECT_EQ(get32(&rd.body[92]), 8u);  // count
     EXPECT_EQ(get32(&rd.body[96]), 1u);  // eof
     EXPECT_EQ(get32(&rd.body[100]), 8u); // data length
-    EXPECT_EQ(std::string(reinterpret_cast<char const*>(&rd.body[104]), 8), "hi there");
+    //  Content is GENERATED from the seed (nodeID here), never the literal bytes
+    //  the store happens to hold — so it is not "hi there".
+    EXPECT_NE(std::string(reinterpret_cast<char const*>(&rd.body[104]), 8), "hi there");
 
     //  READ at/after EOF → zero bytes, eof set.
     std::vector<uint8_t> eofArgs = fhArg(childId, childSnap);
@@ -407,7 +408,9 @@ TEST(NfsV3, MountWalkStat) {
     uint64_t newId = get64(&crr.body[12]);
     uint64_t newSnap = get64(&crr.body[20]);
 
-    //  WRITE "payload!" at offset 0.
+    //  WRITE "payload!" at offset 0. The bytes are NOT stored — they are folded
+    //  into the file's content seed. count "written" is the full length; size
+    //  grows to cover it.
     std::string payload = "payload!";
     std::vector<uint8_t> wr = fhArg(newId, newSnap);
     putU64(wr, 0);                             // offset
@@ -419,16 +422,36 @@ TEST(NfsV3, MountWalkStat) {
     ASSERT_EQ(wrr.astat, 0u);
     EXPECT_EQ(get32(&wrr.body[0]), 0u); // NFS3_OK
     //  status(4) + wcc pre(28) + wcc post(88) → count at 120.
-    EXPECT_EQ(get32(&wrr.body[120]), 8u); // count written
+    EXPECT_EQ(get32(&wrr.body[120]), 8u); // count "written"
 
-    //  READ it back → the same bytes.
+    //  GETATTR → size reflects the write (metadata), though no bytes were stored.
+    Reply gw = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(newId, newSnap));
+    EXPECT_EQ(get64(&gw.body[24]), 8u); // size == 8
+
+    //  READ returns GENERATED content, never the literal bytes written.
     std::vector<uint8_t> rb = fhArg(newId, newSnap);
     putU64(rb, 0);
     put32(rb, 100);
     Reply rbr = rpc(fd, PROG_NFS, NFS_V3, 6, rb);
     ASSERT_EQ(rbr.astat, 0u);
     EXPECT_EQ(get32(&rbr.body[92]), 8u); // count
-    EXPECT_EQ(std::string(reinterpret_cast<char const*>(&rbr.body[104]), 8), "payload!");
+    std::string got(reinterpret_cast<char const*>(&rbr.body[104]), 8);
+    EXPECT_NE(got, "payload!"); // synthesized from the seed, not stored
+
+#ifdef PRFS_WITH_CONTENT
+    //  A different write evolves the seed → different generated content, proving
+    //  reads reflect writes without any bytes being stored.
+    std::vector<uint8_t> wr2 = fhArg(newId, newSnap);
+    putU64(wr2, 0);
+    put32(wr2, 8);
+    put32(wr2, 2);
+    std::vector<uint8_t> pl2 = strArg("XYZW1234");
+    wr2.insert(wr2.end(), pl2.begin(), pl2.end());
+    ASSERT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 7, wr2).body[0]), 0u);
+    Reply rbr3 = rpc(fd, PROG_NFS, NFS_V3, 6, rb);
+    std::string got2(reinterpret_cast<char const*>(&rbr3.body[104]), 8);
+    EXPECT_NE(got2, got); // the write changed the generated content
+#endif
 
     //  SETATTR: truncate to 4 bytes, then READ sees the shorter file.
     std::vector<uint8_t> sa = fhArg(newId, newSnap);

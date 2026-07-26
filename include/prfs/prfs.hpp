@@ -56,6 +56,11 @@ public:
     virtual std::string target() const = 0;                 // LNK
     virtual std::pair<uint32_t, uint32_t> rdev() const = 0; // BLK/CHR (major,minor)
     virtual std::string content() const = 0;                // REG (opaque block struct)
+
+    //  REG content seed (design §11.2): the value the content provider hashes to
+    //  generate bytes. Defaults to the nodeID; a WRITE evolves it (see
+    //  setContentSeed) so generated content reflects writes without storing bytes.
+    virtual uint64_t contentSeed() const = 0;
 };
 
 using Node = std::shared_ptr<INode>;
@@ -133,6 +138,11 @@ public:
     virtual Error setContent(Node reg, std::string const& content) = 0;
     virtual Error setTarget(Node lnk, std::string const& target) = 0;
     virtual Error setRdev(Node dev, uint32_t major, uint32_t minor) = 0;
+
+    //  Set a REG's content seed (design §11.2). The synthetic-target WRITE path:
+    //  a write stores no bytes — it folds the written data into this seed, and
+    //  READ regenerates content from (ContentConfig, seed, offset).
+    virtual Error setContentSeed(Node reg, uint64_t seed) = 0;
 
     //  iteration (vectors for now; streaming iterators are a later refinement)
     virtual std::vector<std::pair<std::string, Node>> readdir(Node dir) = 0;

@@ -109,6 +109,9 @@ std::string serialize(ContentConfig const& c) {
 }
 
 ContentConfig deserialize(std::string_view v) {
+    if (v.empty()) {
+        return ContentConfig{}; // no policy set on the store ⇒ default generation
+    }
     if (v.size() < 16 || v.substr(0, 4) != "PCC1") {
         throw std::runtime_error("content: bad config blob");
     }

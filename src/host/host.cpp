@@ -13,6 +13,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cstring>
 #include <dlfcn.h>
 #include <utility>
 
@@ -31,22 +32,18 @@ size_t Host::read(Node file, uint64_t off, char* out, size_t len) {
     size_t want = size_t(std::min<uint64_t>(len, size - off));
 
 #ifdef PRFS_WITH_CONTENT
-    //  Procedural content: the active provider generates bytes from the store's
-    //  opaque config + the file's node id as seed.
-    std::string cfg = m_fs.contentConfig();
-    if (!cfg.empty()) {
-        if (content::IContentProvider* cp =
-                m_reg.tryResolve<content::IContentProvider>(content::provider())) {
-            return cp->read(cfg, file->id(), size, off, out, len);
-        }
+    //  Synthetic content — the whole point of prfs: bytes are generated, never
+    //  stored. The provider is a pure function of the file's content seed (which
+    //  a WRITE evolves), the store's ContentConfig (empty ⇒ defaults), and the
+    //  offset; the same inputs always reproduce the same bytes.
+    if (content::IContentProvider* cp =
+            m_reg.tryResolve<content::IContentProvider>(content::provider())) {
+        return cp->read(m_fs.contentConfig(), file->contentSeed(), size, off, out, len);
     }
 #endif
 
-    //  Fallback: literal stored bytes (small files), zero-filled to size.
-    std::string lit = file->content();
-    for (size_t i = 0; i < want; ++i) {
-        out[i] = off + i < lit.size() ? lit[off + i] : '\0';
-    }
+    //  No content provider compiled: the file reads as a hole (zeros to length).
+    std::memset(out, 0, want);
     return want;
 }
 

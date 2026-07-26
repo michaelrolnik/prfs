@@ -145,6 +145,7 @@ public:
     std::string target() const override;
     std::pair<uint32_t, uint32_t> rdev() const override;
     std::string content() const override;
+    uint64_t contentSeed() const override;
 
 private:
     PrfsStore* m_store;
@@ -338,6 +339,22 @@ public:
         }
         r.spec = (uint64_t(maj) << 32) | min;
         storeNode(w.get(), dev->id(), m_cur, r);
+        w->commit();
+        return Error::OK;
+    }
+
+    Error setContentSeed(Node reg, uint64_t seed) override {
+        auto w = m_kv->begin(true);
+        NodeRec r;
+
+        if (!loadNode(w.get(), reg->id(), m_cur, r)) {
+            return Error::NOENT;
+        }
+        if (r.type != uint32_t(Type::REG)) {
+            return Error::INVAL;
+        }
+        r.spec = seed; // the content seed lives in spec for REG (blob stays empty)
+        storeNode(w.get(), reg->id(), m_cur, r);
         w->commit();
         return Error::OK;
     }
@@ -963,6 +980,12 @@ std::string PrfsNode::content() const {
 std::pair<uint32_t, uint32_t> PrfsNode::rdev() const {
     uint64_t s = m_store->readNode(m_id, m_snap).spec;
     return {uint32_t(s >> 32), uint32_t(s & 0xffffffff)};
+}
+
+uint64_t PrfsNode::contentSeed() const {
+    NodeRec r = m_store->readNode(m_id, m_snap);
+    //  spec holds an evolved seed once written; 0 ⇒ the pristine nodeID seed.
+    return (r.type == uint32_t(Type::REG) && r.spec != 0) ? r.spec : m_id;
 }
 
 } // namespace

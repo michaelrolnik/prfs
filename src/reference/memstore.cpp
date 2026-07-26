@@ -92,6 +92,7 @@ public:
     std::string target() const override;
     std::pair<uint32_t, uint32_t> rdev() const override;
     std::string content() const override;
+    uint64_t contentSeed() const override;
 
 private:
     MemStore* m_store;
@@ -264,6 +265,15 @@ public:
         }
         liveVer(dev->id()).a.spec = (uint64_t(maj) << 32) | min;
         touch(dev->id());
+        return Error::OK;
+    }
+
+    Error setContentSeed(Node reg, uint64_t seed) override {
+        if (reg->type() != Type::REG) {
+            return Error::INVAL;
+        }
+        liveVer(reg->id()).a.spec = seed; // seed lives in spec for REG
+        touch(reg->id());
         return Error::OK;
     }
 
@@ -686,6 +696,15 @@ std::pair<uint32_t, uint32_t> MemNode::rdev() const {
     auto v = m_store->eff(m_id, m_snap);
     uint64_t s = v ? v->a.spec : 0;
     return {uint32_t(s >> 32), uint32_t(s & 0xffffffff)};
+}
+
+uint64_t MemNode::contentSeed() const {
+    if (type() != Type::REG) {
+        return m_id;
+    }
+    auto v = m_store->eff(m_id, m_snap);
+    //  spec holds an evolved seed once written; 0 ⇒ the pristine nodeID seed.
+    return (v && v->a.spec != 0) ? v->a.spec : m_id;
 }
 
 } // anonymous namespace

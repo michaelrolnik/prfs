@@ -86,10 +86,13 @@ fields rather than carrying a fat struct):
   carry stored bytes; the common procedural case carries none. The old interned `content`/
   `contentID` table is retained only for that optional literal path.)
 
-The file's **`nodeID` is its content seed** — no separate per-node `seed` field, and no
-per-file recipe. Compressibility (entropy), dedup, and sparseness are **filesystem-level**
-config (§11.2), not per-file attributes; hashing the `nodeID` into the generator gives each
-file a distinct-but-reproducible stream.
+The file's **content seed** defaults to its **`nodeID`** — no per-file recipe. Compressibility
+(entropy), dedup, and sparseness are **filesystem-level** config (§11.2), not per-file
+attributes; hashing the seed into the generator gives each file a distinct-but-reproducible
+stream. A **WRITE evolves the seed** rather than storing bytes: the written data is folded into
+the seed (kept in `spec` for a `REG`, `0` ⇒ pristine nodeID), so a rewrite deterministically
+changes what the file reads back — cost is one 64-bit update, not the bytes. This is the point
+of the synthetic target: no amount of writing grows the store by file content.
 
 **`size` is authoritative for `st_size`.** The per-node `size` attribute — not the shared
 block structure — is what `GETATTR`/`READ` report and what the content provider is asked to

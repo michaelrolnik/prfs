@@ -13,8 +13,10 @@
 //  FSSTAT/FSINFO/PATHCONF report volume usage, server parameters, and limits
 //  (the libprfs_nfs §9 projection). The write surface — SETATTR, WRITE, CREATE,
 //  MKDIR, SYMLINK, MKNOD, REMOVE, RMDIR, RENAME, LINK, COMMIT — mutates the live
-//  tree (a fh into a snapshot view is read-only → NFS3ERR_ROFS). WRITE splices
-//  into a node's literal content (whole-file model).
+//  tree (a fh into a snapshot view is read-only → NFS3ERR_ROFS). WRITE stores no
+//  bytes: it folds the data into the file's content seed, so READ regenerates
+//  content that reflects the write while the store grows by nothing — the point
+//  of a synthetic target.
 //
 //  Filehandle (nfs_fh3): 16 opaque bytes = big-endian (nodeID, snapId). Decoded
 //  back to a node via IPrfs::nodeById(); a null result maps to NFS3ERR_STALE.
@@ -75,9 +77,6 @@ constexpr uint32_t NF3BLK = 3, NF3CHR = 4, NF3SOCK = 6, NF3FIFO = 7;
 
 //  set_time enum (SETATTR sattr3): 1 = server time, 2 = client-supplied time.
 constexpr uint32_t SET_TO_SERVER_TIME = 1, SET_TO_CLIENT_TIME = 2;
-
-//  Largest offset+len a literal WRITE may reach (a synthetic target guard).
-constexpr uint64_t MAX_WRITE_FILE = uint64_t(1) << 30;
 
 //  Largest READ we answer in one reply (also the rtmax FSINFO will advertise).
 constexpr uint32_t MAX_READ = 1u << 20;
@@ -370,6 +369,17 @@ void applyCred(Cred const& cred, Node const& n) {
         n->uid(cred.uid);
         n->gid(cred.gid);
     }
+}
+
+//  Fold a WRITE (offset + bytes) into the file's content seed — an FNV-1a mix
+//  over the current seed, offset, and data. Deterministic (same write ⇒ same
+//  seed) and order-sensitive; never returns 0 (0 means "pristine, use nodeID").
+uint64_t mixSeed(uint64_t seed, uint64_t off, std::string const& data) {
+    uint64_t h = seed ^ (off + 0x9E3779B97F4A7C15ull);
+    for (unsigned char c : data) {
+        h = (h ^ c) * 0x100000001B3ull;
+    }
+    return h ? h : 1;
 }
 
 size_t pad4(size_t n) { return (n + 3) & ~size_t(3); }
@@ -1020,27 +1030,19 @@ private:
             encodeWcc(w, preOf(n.get()), n.get());
             return SUCCESS;
         }
-        if (off + data.size() > MAX_WRITE_FILE) {
-            w.u32(NFS3ERR_FBIG);
-            encodeWcc(w, preOf(n.get()), n.get());
-            return SUCCESS;
-        }
         PreAttr pre = preOf(n.get());
-        //  Splice into the node's literal content (whole-file model; procedural
-        //  content is a read-time concern).
-        std::string c = n->content();
-        if (off + data.size() > c.size()) {
-            c.resize(off + data.size(), '\0');
-        }
-        std::copy(data.begin(), data.end(), c.begin() + off);
-        fs.setContent(n, c);
+        //  The whole point of prfs: store no bytes. Fold the written data into
+        //  the file's content seed — READ regenerates content from that seed, so
+        //  a write deterministically changes what the file reads back while the
+        //  store grows by nothing. Size still tracks the highest byte written.
+        fs.setContentSeed(n, mixSeed(n->contentSeed(), off, data));
         if (off + data.size() > n->size()) {
             n->size(off + data.size());
         }
         n->mtime(fs.now());
         w.u32(NFS3_OK);
         encodeWcc(w, pre, n.get());
-        w.u32(uint32_t(data.size())); // count written
+        w.u32(uint32_t(data.size())); // count "written" (all of it, into the seed)
         w.u32(WRITE_FILE_SYNC);       // committed
         w.u32(0);                     // writeverf[8]
         w.u32(0);

@@ -46,12 +46,16 @@ if get_option('plugins')
     )
     test('host', test_host, depends : null_so, timeout : 60)
 
+    nfsv3_test_args = ['-DNFSV3_PLUGIN_SO="' + nfsv3_so.full_path() + '"']
+    if get_option('content')
+        nfsv3_test_args += '-DPRFS_WITH_CONTENT' # enables the seed→content assertions
+    endif
     test_nfsv3 = executable(
         'test_nfsv3',
         'nfsv3/nfsv3_test.cpp',
         include_directories : [test_inc, prfs_inc, spdlog_inc],
         override_options    : ['warning_level=0'],
-        cpp_args            : ['-DNFSV3_PLUGIN_SO="' + nfsv3_so.full_path() + '"'],
+        cpp_args            : nfsv3_test_args,
         dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
     )
     test('nfsv3', test_nfsv3, depends : nfsv3_so, timeout : 60)
