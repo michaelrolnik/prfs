@@ -110,6 +110,11 @@ public:
     virtual std::vector<SnapId> snapshots() const = 0;
     virtual SnapInfo snapInfo(SnapId) const = 0; // {ctime,label}; unknown id → ctime 0
 
+    //  Reconstruct a handle from a decoded filehandle (nodeID, snapId) — the NFS
+    //  front-end's fh↔node round-trip. nullptr if nothing resolves there (STALE);
+    //  accepts synthesized `.snapshot` ids too.
+    virtual Node nodeById(uint64_t id, SnapId snap) = 0;
+
     //  creation — typed verbs; node born valid, immutable type fixed here
     virtual Node mkdir() = 0;
     virtual Node mkfile(std::string const& content) = 0;

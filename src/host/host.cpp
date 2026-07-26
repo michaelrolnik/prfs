@@ -100,8 +100,8 @@ bool Loader::load(std::string const& path) {
     return true;
 }
 
-void Loader::startFrontends() {
-    for (plugin::IFrontend* fe : m_host.registry().resolveAll<plugin::IFrontend>()) {
+void Loader::startServices() {
+    for (plugin::IService* fe : m_host.registry().resolveAll<plugin::IService>()) {
         if (fe->start() == Error::OK) {
             m_started.push_back(fe);
         } else {

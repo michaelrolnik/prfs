@@ -130,6 +130,11 @@ public:
 
     Node snapshotRoot(SnapId n) override { return handle(m_root, n); }
 
+    Node nodeById(uint64_t id, SnapId snap) override {
+        uint64_t base = isSnapDir(id) ? snapBase(id) : id;
+        return effR(base, resolve(snap)) ? handle(id, snap) : nullptr;
+    }
+
     std::vector<SnapId> snapshots() const override {
         std::vector<SnapId> v;
         for (SnapId s = 1; s < m_cur; ++s) {

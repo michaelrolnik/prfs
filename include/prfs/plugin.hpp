@@ -50,21 +50,24 @@ public:
     virtual char const* version() const = 0;
 };
 
-//  A CLI option a front-end contributes (kept CLI-library-agnostic).
+//  A CLI option a service contributes (kept CLI-library-agnostic).
 struct Option {
     std::string name, help, def;
     bool flag = false;
 };
 
-//  A protocol front-end. The di name is the protocol, e.g. "nfsv3" / "mount".
-struct IFrontend {
-    static constexpr std::string_view ID = "prfs.frontend/1";
+//  A long-running service the host starts and stops — a protocol front-end
+//  (nfsv3, mount, nfsv4), or anything else that serves. It owns its own threads.
+//  The di name is the service, e.g. "nfsv3". `start()` binds/listens and returns
+//  (the work runs on the service's threads); `stop()` shuts it down and joins.
+struct IService {
+    static constexpr std::string_view ID = "prfs.service/1";
 
-    virtual ~IFrontend() = default;
+    virtual ~IService() = default;
 
     virtual std::vector<Option> options() const { return {}; } // CLI args it adds
 
-    virtual Error start() = 0; // bind/listen; owns its threads
+    virtual Error start() = 0;
     virtual void stop() = 0;
 };
 

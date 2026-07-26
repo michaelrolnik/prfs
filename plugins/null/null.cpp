@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Michael Rolnik <mrolnik@gmail.com>
 
 //
-//  null — the reference/test front-end plugin. It provides an IFrontend named
+//  null — the reference/test front-end plugin. It provides an IService named
 //  "null" that, on start(), performs one scripted store operation (no network),
 //  and withdraws itself on destroy. Proves the whole host↔plugin path: dlopen,
 //  ABI check, create → provide, resolveAll → start/stop, destroy → withdraw.
@@ -13,7 +13,7 @@ namespace {
 using namespace prfs;
 using namespace prfs::plugin;
 
-struct NullFrontend : IFrontend {
+struct NullFrontend : IService {
     IHost& host;
     bool running = false;
 
@@ -40,10 +40,10 @@ struct NullPlugin : IPlugin {
     explicit NullPlugin(IHost& h)
         : host(h)
         , frontend(h) {
-        host.registry().provide<IFrontend>(&frontend, "null");
+        host.registry().provide<IService>(&frontend, "null");
     }
 
-    ~NullPlugin() override { host.registry().withdraw<IFrontend>("null"); }
+    ~NullPlugin() override { host.registry().withdraw<IService>("null"); }
 
     char const* name() const override { return "null"; }
 

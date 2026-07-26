@@ -216,6 +216,12 @@ public:
 
     Node snapshotRoot(SnapId n) override { return handle(m_root, n); }
 
+    Node nodeById(uint64_t id, SnapId snap) override {
+        auto r = m_kv->begin(false);
+        uint64_t base = isSnapDir(id) ? snapBase(id) : id;
+        return existedAt(r.get(), base, rr(snap)) ? handle(id, snap) : nullptr;
+    }
+
     std::vector<SnapId> snapshots() const override {
         std::vector<SnapId> out;
 

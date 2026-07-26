@@ -14,11 +14,11 @@ the active rng. One wiring mechanism (the `di::Registry`) for built-ins and plug
 ## 1. Model
 
 - **Interfaces have IDs** — each pluggable interface carries a stable versioned ID
-  (`"prfs.frontend/1"`); it is the `di` key. Bumping the interface = a new ID.
+  (`"prfs.service/1"`); it is the `di` key. Bumping the interface = a new ID.
 - **Plugins provide into the registry** — on load a plugin registers its implementations:
-  `reg.provide<IFrontend>(myServer)`, `reg.provide<IRng>(myGen, "fastrng")`. Built-ins do the
+  `reg.provide<IService>(myServer)`, `reg.provide<IRng>(myGen, "fastrng")`. Built-ins do the
   same at startup; a plugin is just late registration after `dlopen`.
-- **The host resolves and acts** — `reg.resolveAll<IFrontend>()` → start each; the store opens via
+- **The host resolves and acts** — `reg.resolveAll<IService>()` → start each; the store opens via
   `resolve<IStorageEngine>(storageName)`; `content` uses `resolve<IRng>(rngName)`. An interface
   nobody provided simply isn't there (`requireAllResolved` reports it loudly at startup).
 - **DI, not bespoke discovery** — there is no plugin-specific `query`/`interfaces` protocol; the
@@ -28,10 +28,10 @@ the active rng. One wiring mechanism (the `di::Registry`) for built-ins and plug
 prfs host (executable)
   core     : IPrfs store · content · rng · logger (spdlog) · config (CLI11)
   registry : di::Registry  —  (interface-id, name) → provider   (built-ins + plugins)
-  loader   : dlopen → abi-check → register(host) → resolveAll<IFrontend> → start
+  loader   : dlopen → abi-check → register(host) → resolveAll<IService> → start
       │
-      ├── plugins/nfsv3.so   provides IFrontend "nfsv3"
-      ├── plugins/mount.so   provides IFrontend "mount"
+      ├── plugins/nfsv3.so   provides IService "nfsv3"
+      ├── plugins/mount.so   provides IService "mount"
       ├── plugins/fastrng.so provides IRng "fastrng"
       └── plugins/rocks.so   provides IStorageEngine "rocksdb"
 ```
@@ -93,9 +93,9 @@ public:
 struct Option { std::string name, help, def; bool flag = false; };   // a CLI arg
 
 //  A protocol front-end. The di name is the protocol, e.g. "nfsv3" / "mount".
-struct IFrontend {
-    static constexpr std::string_view ID = "prfs.frontend/1";
-    virtual ~IFrontend() = default;
+struct IService {
+    static constexpr std::string_view ID = "prfs.service/1";
+    virtual ~IService() = default;
     virtual std::vector<Option> options() const { return {}; }   // CLI args it adds
     virtual Error start() = 0;                                    // bind/listen; owns its threads
     virtual void stop() = 0;
@@ -133,15 +133,15 @@ load(path):
     plugins.push_back(plug)                   # own it; destroy() (→ withdraw) on shutdown
 
 after all loaded:
-    for fe in reg.resolveAll<IFrontend>():    # built-in + plugin front-ends, uniformly
+    for fe in reg.resolveAll<IService>():    # built-in + plugin front-ends, uniformly
         register fe->options() with CLI11 as --<name>.<opt>
     parse CLI
     reg.requireAllResolved()                  # fail loud: any declared dep still missing
-    for fe in reg.resolveAll<IFrontend>(): fe->start()
+    for fe in reg.resolveAll<IService>(): fe->start()
 ```
 
 - **No bespoke discovery** — a plugin simply `provide`s; the registry is the discovery surface.
-  `resolveAll<IFrontend>()` yields built-in and plugin front-ends the same way; the store opens
+  `resolveAll<IService>()` yields built-in and plugin front-ends the same way; the store opens
   via `resolve<IStorageEngine>(storageName)`; `content` uses `resolve<IRng>(rngName)`.
 - **Order** — load all → collect `options()` → parse CLI → `requireAllResolved()` → `start()`.
   (A plugin's options are only known once it has registered, so CLI parse follows loading.)
@@ -161,7 +161,7 @@ Built-in providers use the very same registry without `dlopen`: the LMDB/mem eng
 - **Lifetime:** the host owns each `IPlugin` (`create`→`destroy`); the interfaces it provided into
   the registry are valid until `destroy`, which `withdraw`s them first. No refcounting — the host
   is the single owner, so a `dlclose` can't leave a dangling registry entry.
-- **Threading:** an `IFrontend` brings its own MT server (own thread pool/event loop in `start()`,
+- **Threading:** an `IService` brings its own MT server (own thread pool/event loop in `start()`,
   joined in `stop()`) — deliberately, given the NFS analysis (naive `rpcgen` is single-threaded,
   todo L2). `IHost` methods are callable from plugin threads: `IPrfs` is concurrency-safe (§8,
   LMDB MVCC), the logger is thread-safe, `read` is a pure lookup.
@@ -174,14 +174,14 @@ Built-in providers use the very same registry without `dlopen`: the LMDB/mem eng
 include/prfs/di.hpp         the di::Registry (di.md)
 include/prfs/plugin.hpp     the prfs interfaces + IDs + extern "C" ABI
 src/host/                   loader + di wiring + main (CLI11 + spdlog)
-plugins/null/               a test plugin providing IFrontend (+ a test IRng)
+plugins/null/               a test plugin providing IService (+ a test IRng)
 plugins/nfsv3/  …           real front-ends → <name>.so
 ```
 
 - **meson:** `-Dplugins` option; the host links `libprfs` + content + rng + CLI11 + spdlog; each
   plugin is a `shared_module`. **spdlog + CLI11** are git submodules (matching the vendoring
   pattern). Logging/CLI live only in the host+plugin layer; leaf libraries stay free of them.
-- **Testing (test-first):** a `null` plugin that provides `IFrontend` whose `start()` runs a
+- **Testing (test-first):** a `null` plugin that provides `IService` whose `start()` runs a
   scripted set of `IHost`/`IPrfs` ops and logs — proves `provide`/`resolveAll`, the ABI check, and
   the lifecycle end to end, built both **in-tree** (direct `provide`) and as a **.so** (dlopen).
   Also a trivial `IRng` provider to prove non-front-end interfaces wire through. Registry-level
@@ -193,12 +193,12 @@ plugins/nfsv3/  …           real front-ends → <name>.so
 
 ## 7. Open questions
 
-- **Filehandle ↔ node.** An NFS `IFrontend` must turn a filehandle `(nodeID, snapId)` back into a
+- **Filehandle ↔ node.** An NFS `IService` must turn a filehandle `(nodeID, snapId)` back into a
   `Node`; today handles come only from traversal, so L2 wants `IPrfs::nodeById(id, snap)` (plus
   the T1/T4/T5 carve-outs: `..` via-parent, cookie mapping, `.snapshot` listing).
 - **Interface evolution.** Versioned IDs handle breaking changes; whether to also support
-  additive minor versions (a plugin exporting `prfs.frontend/1` on a `/2` host) is a policy to
+  additive minor versions (a plugin exporting `prfs.service/1` on a `/2` host) is a policy to
   settle — start strict (exact match).
-- **Interface catalogue.** Start with `IFrontend`, `IRng`, `IStorageEngine`; likely follow-ons:
+- **Interface catalogue.** Start with `IService`, `IRng`, `IStorageEngine`; likely follow-ons:
   content generator, auth, metrics. Each is just another ID.
 - **Config surface.** CLI11 flags vs config file vs both; per-plugin option namespacing.

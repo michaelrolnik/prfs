@@ -45,9 +45,9 @@ int main(int argc, char** argv) {
         for (std::string const& p : plugins) {
             loader.load(p);
         }
-        loader.startFrontends();
+        loader.startServices();
 
-        auto n = host.registry().resolveAll<prfs::plugin::IFrontend>().size();
+        auto n = host.registry().resolveAll<prfs::plugin::IService>().size();
         log->info("prfs-host: store={} engine={} front-ends={}", store, prfs::storageEngine(), n);
 
         //  A real serve loop blocks here; front-ends run on their own threads.

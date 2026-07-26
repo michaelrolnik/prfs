@@ -6,7 +6,7 @@
 //  prfs host — the concrete IHost and the plugin Loader (docs/plugins.md §4).
 //  The Loader dlopen's plugins (or adopts in-tree ones), each of which provides
 //  its interfaces into the host's di registry; the Loader then resolves every
-//  IFrontend and starts it, and tears everything down in reverse on destruction.
+//  IService and starts it, and tears everything down in reverse on destruction.
 //
 #include "prfs/plugin.hpp"
 
@@ -65,8 +65,8 @@ public:
     //  provided into the registry). The Loader does not own/free it.
     void adopt(plugin::IPlugin* plug) { m_entries.push_back({plug, nullptr, nullptr}); }
 
-    //  Resolve every provided IFrontend and start it (skips + logs failures).
-    void startFrontends();
+    //  Resolve every provided IService and start it (skips + logs failures).
+    void startServices();
     void stopAll(); // stop started front-ends, in reverse
 
 private:
@@ -78,7 +78,7 @@ private:
 
     plugin::IHost& m_host;
     std::vector<Entry> m_entries;
-    std::vector<plugin::IFrontend*> m_started;
+    std::vector<plugin::IService*> m_started;
 };
 
 } // namespace prfs::host

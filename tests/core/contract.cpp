@@ -195,4 +195,29 @@ TEST_P(StoreTest, Stats) {
     EXPECT_EQ(s.links, 2u);
 }
 
+TEST_P(StoreTest, NodeById) {
+    auto root = fs->rwRoot();
+    auto f = fs->mkfile("x");
+    fs->link(root, "f", f);
+
+    auto again = fs->nodeById(f->id(), LATEST); // filehandle round-trip
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->id(), f->id());
+    EXPECT_EQ(again->content(), "x");
+
+    EXPECT_FALSE(fs->nodeById(999999, LATEST)); // unknown → STALE
+
+    SnapId s1 = fs->snapshot();
+    fs->setContent(f, "y");
+    auto atS1 = fs->nodeById(f->id(), s1); // fh into a past snapshot
+    ASSERT_TRUE(atS1);
+    EXPECT_EQ(atS1->content(), "x"); // range-back
+
+    auto snapDir = fs->lookup(root, SNAPSHOT_NAME); // synthetic .snapshot id round-trips
+    ASSERT_TRUE(snapDir);
+    auto sd = fs->nodeById(snapDir->id(), LATEST);
+    ASSERT_TRUE(sd);
+    EXPECT_EQ(sd->type(), Type::DIR);
+}
+
 INSTANTIATE_TEST_SUITE_P(Engines, StoreTest, ::testing::Values(&oracle, &backend));
