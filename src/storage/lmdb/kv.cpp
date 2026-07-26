@@ -30,6 +30,8 @@ char const* kvName(Kv k) {
         return "changes";
     case Kv::Meta:
         return "meta";
+    case Kv::Snaps:
+        return "snaps";
     default:
         return "";
     }

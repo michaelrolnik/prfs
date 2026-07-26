@@ -260,10 +260,19 @@ public:
         return out;
     }
 
-    SnapId snapshot() override {
+    SnapId snapshot(std::string const& label) override {
         SnapId v = m_cur;
         ++m_cur;
+        m_snaps[v] = SnapInfo{v, m_clock, label};
         return v;
+    }
+
+    SnapInfo snapInfo(SnapId g) const override {
+        auto it = m_snaps.find(g);
+        if (it != m_snaps.end()) {
+            return it->second;
+        }
+        return SnapInfo{g, 0, ""};
     }
 
     std::vector<NodeDiff> diffNodes(SnapId a, SnapId b) override {
@@ -463,6 +472,7 @@ private:
     std::map<std::pair<uint64_t, std::string>, std::vector<LinkIv>> m_links;
     std::map<uint64_t, std::set<std::string>> m_names;
     std::map<SnapId, std::set<uint64_t>> m_changes;
+    std::map<SnapId, SnapInfo> m_snaps;
     uint64_t m_next = 1;
     SnapId m_cur = 1;
     uint64_t m_root = 0;

@@ -22,7 +22,7 @@
 namespace prfs {
 
 //  fixed sub-stores (LMDB dbis / rocksdb column families / separate maps)
-enum class Kv { Nodes, DownLinks, UpLinks, Changes, Meta, COUNT_ };
+enum class Kv { Nodes, DownLinks, UpLinks, Changes, Meta, Snaps, COUNT_ };
 
 class IKvCursor {
 public:

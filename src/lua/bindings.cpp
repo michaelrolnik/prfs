@@ -15,7 +15,8 @@
 //    store:setContent / :setTarget / :setRdev
 //    store:readdir(dir) -> { {name=,node=}, ... }   store:parents(node) -> { node, ... }
 //    store:now() / :setTime(t)   -- logical clock (deterministic, script-driven)
-//    store:snapshot() -> id   :diffNodes(a,b)   :diffPaths(a,b)   :stats()   :fsStat()
+//    store:snapshot([label]) -> id   :snapInfo(id) -> {id,ctime,label}
+//    store:diffNodes(a,b)   :diffPaths(a,b)   :stats()   :fsStat()
 //
 //    node:id() :type() :nlink() :size()/:setSize(v) :mode()/:setMode(v) (uid/gid/atime/mtime/ctime)
 //    node:target() :content() :rdev() -> (major, minor)
@@ -97,6 +98,16 @@ sol::table diffPathsLua(IPrfs& s, SnapId a, SnapId b, sol::this_state ts) {
                                          p.name, "child", p.child);
     }
     return out;
+}
+
+SnapId snapshotLua(IPrfs& s, sol::optional<std::string> label) {
+    return s.snapshot(label.value_or(""));
+}
+
+sol::table snapInfoLua(IPrfs& s, SnapId g, sol::this_state ts) {
+    sol::state_view lua(ts);
+    SnapInfo i = s.snapInfo(g);
+    return lua.create_table_with("id", i.id, "ctime", i.ctime, "label", i.label);
 }
 
 sol::table statsLua(IPrfs& s, sol::this_state ts) {
@@ -181,6 +192,7 @@ void registerLua(sol::state_view lua) {
         "root", &IPrfs::rwRoot,               //
         "snapshotRoot", &IPrfs::snapshotRoot, //
         "snapshots", &snapshotsLua,           //
+        "snapInfo", &snapInfoLua,             //
         "mkdir", &IPrfs::mkdir,               //
         "mkfile", &IPrfs::mkfile,             //
         "symlink", &IPrfs::symlink,           //
@@ -198,7 +210,7 @@ void registerLua(sol::state_view lua) {
         "parents", &parentsLua,               //
         "now", &IPrfs::now,                   //
         "setTime", &IPrfs::setTime,           //
-        "snapshot", &IPrfs::snapshot,         //
+        "snapshot", &snapshotLua,             //
         "diffNodes", &diffNodesLua,           //
         "diffPaths", &diffPathsLua,           //
         "stats", &statsLua,                   //

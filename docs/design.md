@@ -209,7 +209,14 @@ Rules that make it behave (and not explode a tree walk):
 
 The reserved `.snapshot` name is owned by the **store**, so Lua tests and the NFS front-end
 behave identically. Because it is synthesized, `snapshot()` writes **no** link — it is just
-*seal + `cur_snap++`* (§6).
+*seal + `cur_snap++`* plus one small metadata record (§6).
+
+**Snapshot metadata.** A `snaps: snapId → { ctime, label }` table records, for each sealed
+snapshot, the logical time it was taken (`ctime = now()`, §3.5) and an optional caller
+`label`. `snapshot("monday")` writes it; `snapInfo(id)` reads it back (an unknown id yields
+`ctime = 0`, empty label). This is the per-snapshot anchor that mtime-window incrementals and
+the synthesized `.snapshot` listing (name + mtime per entry) build on. Persisted like the
+other store meta, so it survives reopen.
 
 **View inheritance (the traversal rule).** A child normally inherits its parent's snapshot
 view; the *only* place the view changes is crossing a synthesized `.snapshot/N`. This is
@@ -311,7 +318,7 @@ out before the txn ends); keep read transactions short.
 
 | Sub-DB     | Key                                                       | Value                                                                       | Flags     |
 |------------|-----------------------------------------------------------|-----------------------------------------------------------------------------|-----------|
-| `meta`     | `"next_node"`/`"next_str"`/`"next_content"`/`"cur_snap"`/`"root"` | scalar                                                          | —         |
+| `meta`     | `"next_node"`/`"next_str"`/`"next_content"`/`"cur_snap"`/`"root"`/`"clock"` | scalar                                                 | —         |
 | `nodes`    | `nodeID(8) ‖ snapId(8)`                                    | `{type, mode, nlink, uid, gid, size, atime, mtime, ctime, spec(8), dnLinkVer(8), upLinkVer(8), linkMode}` | —         |
 | `downlinks`| `containerID(8) ‖ dnLinkVer(8) ‖ stringID(8)`            | `{childNodeID(8)}`                                                          | —         |
 | `uplinks`  | `nodeID(8) ‖ upLinkVer(8) ‖ containerID(8) ‖ stringID(8)`| `{}`                                                                        | —         |
@@ -320,6 +327,7 @@ out before the txn ends); keep read transactions short.
 | `content`  | `contentID(8)`                                           | `{snapId(8), block-structure bytes}` (opaque)                               | —         |
 | `conhash`  | `hash(8)` → dup `contentID(8)`                            | —                                                                           | `DUPSORT` |
 | `changes`  | `snapId(8) ‖ nodeID(8)`                                  | `hint(1)` — candidate index for `diff` (§6.1)                               | —         |
+| `snaps`    | `snapId(8)`                                              | `{ctime(8), label bytes}` — per-snapshot metadata (§3.2)                    | —         |
 | `stats`    | `snapId(8)`                                              | `{nodes[7], links, totalSize, …}` (§9)                                      | —         |
 
 Notes:

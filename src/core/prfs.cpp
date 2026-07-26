@@ -331,14 +331,29 @@ public:
         return out;
     }
 
-    SnapId snapshot() override {
+    SnapId snapshot(std::string const& label) override {
         SnapId v = m_cur;
         m_cur = v + 1;
         auto w = m_kv->begin(true);
 
         putMeta(w.get(), "cur_snap", m_cur);
+        //  snaps: snapId → { ctime(8) ‖ label } (design §3.2)
+        w->put(Kv::Snaps, be(v), be(m_clock) + label);
         w->commit();
         return v;
+    }
+
+    SnapInfo snapInfo(SnapId g) const override {
+        SnapInfo out;
+        out.id = g;
+
+        auto r = m_kv->begin(false);
+        std::string rec;
+        if (r->get(Kv::Snaps, be(g), rec) && rec.size() >= 8) {
+            out.ctime = rdbe(rec.data());
+            out.label.assign(rec.data() + 8, rec.size() - 8);
+        }
+        return out;
     }
 
     std::vector<NodeDiff> diffNodes(SnapId a, SnapId b) override {

@@ -11,7 +11,7 @@ Status: ✅ done · ⬜ open.
 | --- | ------ | --------------------------------------------------------------------------- |
 | T1  | ✅     | Directory DAG: DFS cycle-prevention on dir link/move (fixes B1)             |
 | T2  | ✅     | `diffNodes` / `diffPaths` design (fixes B2)                                 |
-| T3  | ⬜     | `snaps: snapId → {ctime, label}` table (fixes B3)                           |
+| T3  | ✅     | `snaps: snapId → {ctime, label}` table (fixes B3)                           |
 | T4  | ⬜     | `readdir` cookies + live-dir mutate-mid-scan (fixes B4)                     |
 | T5  | ⬜     | Synthesized `.snapshot` node: identity, attrs, `readdir`, filehandle (B5)   |
 | T6  | ✅     | Deterministic logical / script-driven clock (fixes B6)                     |
@@ -46,7 +46,7 @@ Status: ✅ done · ⬜ open.
 
 - **T1** ✅ — directory DAG (design §2.2): DFS cycle-prevention on dir link/move — `link`/`move` reject a cycle-closing directory edge via `reachable(child, dir)` over directory down-links; files skip it, self-links caught, `move` links-before-unlinks so it's covered and atomic. Store keeps `nlink = #incoming`. Both engines; hardened by `tests/core/dag.cpp` (7 cases × 2 engines). Fixes B1. *Carved out to the NFS front-end (todo L2, not `libprfs`):* `..` = **via-parent** (filehandle-encoded, depth-bounded chain); dir-`nlink` reporting mode (POSIX-compat `2 + #subdirs` default / faithful `#parents`).
 - **T2** ✅ — design done (fixes B2): `diffNodes(A,B)` = node-level state comparison + on-demand `diffPaths` over a `changes` candidate index (design §6.1). Implementation tracked under Scaffolding.
-- **T3** ⬜ — add `snaps: snapId → {ctime, label}` table; `snapshot()` writes it (fixes B3).
+- **T3** ✅ — `snaps: snapId → {ctime, label}` sub-store (`Kv::Snaps`), written by `snapshot(label)` (ctime = logical `now()`, §3.5), read via `IPrfs::snapInfo(id)` (design §3.2). Persisted (survives reopen); both engines; Lua `store:snapshot([label])` / `store:snapInfo(id)`; tests `tests/core/snapshot.cpp` + crash-suite persistence. Fixes B3.
 - **T4** ⬜ — define `readdir` cookies + live-dir mutate-mid-scan behaviour (fixes B4).
 - **T5** ⬜ — define the synthesized `.snapshot` node: identity, attrs, `readdir`, filehandle (fixes B5).
 - **T6** ✅ — timestamp policy: a deterministic, script-driven **logical clock** (design §3.5). `IPrfs::now()`/`setTime()` on the interface; new nodes stamp `atime=mtime=ctime=now()`, other time changes explicit; never wall-clock; persisted in `meta` (survives reopen). Both engines; Lua `store:now()`/`setTime()`; tests `tests/core/clock.cpp` + crash-suite persistence. Fixes B6.

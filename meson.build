@@ -148,6 +148,7 @@ fmt_files = files(
     'tests/core/differential.cpp',
     'tests/core/invariant.cpp',
     'tests/core/determinism.cpp',
+    'tests/core/snapshot.cpp',
     'tests/storage/lmdb/crash.cpp',
     'tests/nfs/fsstat.cpp',
 )

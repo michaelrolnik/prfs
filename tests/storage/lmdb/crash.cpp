@@ -66,6 +66,7 @@ TEST(CrashSafety, CommittedStateSurvivesReopen) {
         }
         m.a().setTime(1234567); // the logical clock must survive too
         clock = m.a().now();
+        m.a().snapshot("labelled"); // snapshot metadata must survive too
         view = canon(m.a(), m.a().rwRoot());
         stats = statsStr(m.a());
         snaps = m.a().snapshots();
@@ -81,6 +82,10 @@ TEST(CrashSafety, CommittedStateSurvivesReopen) {
         EXPECT_EQ(stats, statsStr(*fs)) << "counters lost across reopen";
         EXPECT_EQ(clock, fs->now()) << "logical clock lost across reopen";
         ASSERT_EQ(snaps, fs->snapshots());
+        ASSERT_FALSE(snaps.empty());
+        SnapInfo si = fs->snapInfo(snaps.back());
+        EXPECT_EQ(si.ctime, 1234567u) << "snapshot ctime lost across reopen";
+        EXPECT_EQ(si.label, "labelled") << "snapshot label lost across reopen";
         for (size_t i = 0; i < snaps.size(); ++i) {
             SCOPED_TRACE("snapshot view " + std::to_string(snaps[i]));
             EXPECT_EQ(snapViews[i], canon(*fs, fs->snapshotRoot(snaps[i])));

@@ -69,6 +69,14 @@ struct NodeDiff {
     NodeChange change;
 };
 
+//  Per-snapshot metadata (design §3.2). `ctime` is the logical time snapshot()
+//  ran; `label` is an optional caller-supplied name (e.g. "monday").
+struct SnapInfo {
+    SnapId id = 0;
+    uint64_t ctime = 0;
+    std::string label;
+};
+
 enum class PathChange { ADDED, REMOVED };
 
 struct PathDiff {
@@ -86,6 +94,7 @@ public:
     virtual Node rwRoot() = 0;             // (root, LATEST)
     virtual Node snapshotRoot(SnapId) = 0; // (root, N)
     virtual std::vector<SnapId> snapshots() const = 0;
+    virtual SnapInfo snapInfo(SnapId) const = 0; // {ctime,label}; unknown id → ctime 0
 
     //  creation — typed verbs; node born valid, immutable type fixed here
     virtual Node mkdir() = 0;
@@ -116,7 +125,7 @@ public:
     virtual void setTime(uint64_t t) = 0; // set the logical time (the only advance)
 
     //  versioning
-    virtual SnapId snapshot() = 0;
+    virtual SnapId snapshot(std::string const& label = "") = 0;
     virtual std::vector<NodeDiff> diffNodes(SnapId a, SnapId b) = 0;
     virtual std::vector<PathDiff> diffPaths(SnapId a, SnapId b) = 0;
 

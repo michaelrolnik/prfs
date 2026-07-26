@@ -15,6 +15,7 @@ tests = [
     ['differential', 'core/differential.cpp', 120],
     ['invariant', 'core/invariant.cpp', 120],
     ['determinism', 'core/determinism.cpp', 120],
+    ['snapshot', 'core/snapshot.cpp', 60],
     ['crash', 'storage/lmdb/crash.cpp', 120],
     ['fsstat', 'nfs/fsstat.cpp', 60],
 ]

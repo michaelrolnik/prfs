@@ -97,4 +97,9 @@ assert(s:now() == 1700000000)
 local timed = s:mkfile("t")
 assert(timed:mtime() == 1700000000, "new node stamps the logical clock")
 
+-- snapshot metadata ---------------------------------------------------------
+local labelled = s:snapshot("release-1")
+local si = s:snapInfo(labelled)
+assert(si.id == labelled and si.ctime == 1700000000 and si.label == "release-1")
+
 print("prfs lua smoke: OK")
