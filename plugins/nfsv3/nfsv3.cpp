@@ -7,8 +7,9 @@
 //  listener, both the MOUNT program (100005 v3: MNT/UMNT/EXPORT) and the NFS
 //  program (100003 v3). Implemented so far: MOUNT MNT hands out the root
 //  filehandle for the single export "/"; NFS NULL, GETATTR, LOOKUP, ACCESS let a
-//  client walk the tree and stat nodes. Remaining NFS procedures (READ, READDIR,
-//  FSSTAT/FSINFO, …) build on the same dispatch.
+//  client walk the tree and stat nodes, and READ returns file bytes (sourced by
+//  the host — procedural content or literal). Remaining procedures (READDIR,
+//  FSSTAT/FSINFO, READLINK, …) build on the same dispatch.
 //
 //  Filehandle (nfs_fh3): 16 opaque bytes = big-endian (nodeID, snapId). Decoded
 //  back to a node via IPrfs::nodeById(); a null result maps to NFS3ERR_STALE.
@@ -51,7 +52,10 @@ constexpr uint32_t SUCCESS = 0, PROG_UNAVAIL = 1, PROG_MISMATCH = 2, PROC_UNAVAI
 constexpr uint32_t PROG_NFS = 100003;
 constexpr uint32_t NFS_V3 = 3;
 constexpr uint32_t NFSPROC3_NULL = 0, NFSPROC3_GETATTR = 1, NFSPROC3_LOOKUP = 3,
-                   NFSPROC3_ACCESS = 4;
+                   NFSPROC3_ACCESS = 4, NFSPROC3_READ = 6;
+
+//  Largest READ we answer in one reply (also the rtmax FSINFO will advertise).
+constexpr uint32_t MAX_READ = 1u << 20;
 
 //  MOUNT program (RFC 1813 appendix I) — v3 only. NFSv4 dropped MOUNT entirely
 //  (PUTROOTFH inside COMPOUND replaces it), so this lives with nfsv3, not apart.
@@ -63,7 +67,8 @@ constexpr uint32_t MOUNTPROC3_NULL = 0, MOUNTPROC3_MNT = 1, MOUNTPROC3_UMNT = 3,
 constexpr uint32_t MNT3_OK = 0;
 
 //  A subset of nfsstat3.
-constexpr uint32_t NFS3_OK = 0, NFS3ERR_NOENT = 2, NFS3ERR_NOTDIR = 20, NFS3ERR_STALE = 70;
+constexpr uint32_t NFS3_OK = 0, NFS3ERR_NOENT = 2, NFS3ERR_ISDIR = 21, NFS3ERR_INVAL = 22,
+                   NFS3ERR_NOTDIR = 20, NFS3ERR_STALE = 70;
 
 //  access3 bits — what this synthetic (read-mostly) target grants.
 constexpr uint32_t ACCESS3_READ = 0x0001, ACCESS3_LOOKUP = 0x0002, ACCESS3_EXECUTE = 0x0020;
@@ -177,6 +182,16 @@ struct Writer {
     void time(uint64_t t) {
         u32(uint32_t(t));
         u32(0);
+    }
+
+    //  opaque<>: length then the bytes, zero-padded to a 4-byte boundary.
+    void opaque(void const* data, size_t len) {
+        u32(uint32_t(len));
+        auto const* b = static_cast<uint8_t const*>(data);
+        v.insert(v.end(), b, b + len);
+        while (v.size() % 4) {
+            v.push_back(0);
+        }
     }
 };
 
@@ -429,6 +444,48 @@ private:
             encodePostOp(w, n.get());
             //  Read-mostly target: grant read/lookup/execute, never modify.
             w.u32(want & (ACCESS3_READ | ACCESS3_LOOKUP | ACCESS3_EXECUTE));
+            return SUCCESS;
+        }
+
+        case NFSPROC3_READ: {
+            uint64_t id, snap;
+            if (!r.fh(id, snap)) {
+                return GARBAGE_ARGS;
+            }
+            uint64_t off = r.u64();
+            uint32_t cnt = r.u32();
+            if (!r.ok) {
+                return GARBAGE_ARGS;
+            }
+            Node n = fs.nodeById(id, snap);
+            if (!n) {
+                w.u32(NFS3ERR_STALE);
+                return SUCCESS;
+            }
+            if (n->type() == Type::DIR) {
+                w.u32(NFS3ERR_ISDIR);
+                encodePostOp(w, n.get());
+                return SUCCESS;
+            }
+            if (n->type() != Type::REG) {
+                w.u32(NFS3ERR_INVAL);
+                encodePostOp(w, n.get());
+                return SUCCESS;
+            }
+            //  The host sources the bytes — procedural content (the RNG provider)
+            //  or literal, already clamped to the file size. cnt is capped so a
+            //  large request can't force an outsized allocation/reply.
+            if (cnt > MAX_READ) {
+                cnt = MAX_READ;
+            }
+            std::vector<char> buf(cnt);
+            size_t got = m_host.read(n, off, buf.data(), cnt);
+            bool eof = off + got >= n->size();
+            w.u32(NFS3_OK);
+            encodePostOp(w, n.get()); // file_attributes
+            w.u32(uint32_t(got));     // count
+            w.u32(eof ? 1 : 0);       // eof
+            w.opaque(buf.data(), got);
             return SUCCESS;
         }
 

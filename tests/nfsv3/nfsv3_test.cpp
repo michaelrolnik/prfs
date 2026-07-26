@@ -4,9 +4,9 @@
 //
 //  nfsv3 plugin — end-to-end RPC test. Loads nfsv3.so via the host, then over a
 //  TCP connection walks the real client flow: MOUNT MNT to obtain the root
-//  filehandle, then NFS NULL/GETATTR/LOOKUP/ACCESS against the live store the
-//  host wraps. Proves the transport (record marking + call/reply) and the XDR /
-//  filehandle mapping. NFSV3_PLUGIN_SO is the .so path.
+//  filehandle, then NFS NULL/GETATTR/LOOKUP/ACCESS/READ against the live store
+//  the host wraps. Proves the transport (record marking + call/reply) and the
+//  XDR / filehandle mapping. NFSV3_PLUGIN_SO is the .so path.
 //
 #include "prfs/host.hpp"
 #include "prfs/memstore.hpp"
@@ -194,6 +194,31 @@ TEST(NfsV3, MountWalkStat) {
     EXPECT_EQ(get32(&gf.body[0]), 0u);  // NFS3_OK
     EXPECT_EQ(get32(&gf.body[4]), 1u);  // ftype3 NF3REG
     EXPECT_EQ(get64(&gf.body[24]), 8u); // size
+
+    //  READ the file → its bytes, count, and eof. Body after status(4) is a
+    //  present post_op_attr (1 + fattr3[84] = 88), then count/eof/data<>.
+    std::vector<uint8_t> rdArgs = fhArg(childId, childSnap);
+    put32(rdArgs, 0);   // offset (u64) high
+    put32(rdArgs, 0);   // offset low
+    put32(rdArgs, 100); // count (more than the file holds)
+    Reply rd = rpc(fd, PROG_NFS, NFS_V3, 6, rdArgs);
+    ASSERT_EQ(rd.astat, 0u);
+    ASSERT_GE(rd.body.size(), 112u);
+    EXPECT_EQ(get32(&rd.body[0]), 0u);   // NFS3_OK
+    EXPECT_EQ(get32(&rd.body[92]), 8u);  // count
+    EXPECT_EQ(get32(&rd.body[96]), 1u);  // eof
+    EXPECT_EQ(get32(&rd.body[100]), 8u); // data length
+    EXPECT_EQ(std::string(reinterpret_cast<char const*>(&rd.body[104]), 8), "hi there");
+
+    //  READ at/after EOF → zero bytes, eof set.
+    std::vector<uint8_t> eofArgs = fhArg(childId, childSnap);
+    put32(eofArgs, 0);
+    put32(eofArgs, 8); // offset == size
+    put32(eofArgs, 100);
+    Reply re = rpc(fd, PROG_NFS, NFS_V3, 6, eofArgs);
+    ASSERT_EQ(re.astat, 0u);
+    EXPECT_EQ(get32(&re.body[92]), 0u); // count 0
+    EXPECT_EQ(get32(&re.body[96]), 1u); // eof
 
     //  LOOKUP a missing name → NFS3ERR_NOENT (2).
     std::vector<uint8_t> missArgs = fhArg(fhId, fhSnap);
