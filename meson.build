@@ -223,6 +223,25 @@ if get_option('plugins')
         name_prefix         : '',
     )
 
+    #   bigtree — native store-builder front-end (→ bigtree.so). Populates the
+    #   store on start(); links prfs_content_dep only when content is compiled
+    #   (for the filesystem-wide content policy it sets).
+    bigtree_deps = []
+    bigtree_args = []
+    if get_option('content')
+        bigtree_deps += prfs_content_dep
+        bigtree_args += '-DPRFS_WITH_CONTENT'
+    endif
+    bigtree_so = shared_module(
+        'bigtree',
+        'plugins/bigtree/bigtree.cpp',
+        include_directories : [prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],
+        cpp_args            : bigtree_args,
+        name_prefix         : '',
+        dependencies        : bigtree_deps,
+    )
+
     #   nfsv3 front-end service (→ nfsv3.so). Asio coroutines + threads + spdlog;
     #   prfs_nfs_dep bakes the FSSTAT/FSINFO projection into the module so it has
     #   no undefined symbols at dlopen (the host is loaded RTLD_LOCAL).
@@ -293,6 +312,7 @@ fmt_files = files(
     'plugins/null/null.cpp',
     'plugins/nfsv3/nfsv3.cpp',
     'plugins/luactl/luactl.cpp',
+    'plugins/bigtree/bigtree.cpp',
     'tests/host/host_test.cpp',
     'tests/nfsv3/nfsv3_test.cpp',
     'tests/luactl/luactl_test.cpp',

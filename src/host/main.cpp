@@ -88,6 +88,7 @@ int main(int argc, char** argv) {
     std::string control;
     std::vector<std::string> plugins;
     std::vector<std::string> pluginDirs;
+    std::vector<std::string> sets;
 
     app.add_option("--store", store, "store path");
     app.add_flag("--clean", clean, "wipe the store on open");
@@ -99,6 +100,9 @@ int main(int argc, char** argv) {
     app.add_option("--control", control, "unix socket path for the luactl Lua console");
     app.add_option("--plugin", plugins, "front-end plugin .so to load")->expected(-1);
     app.add_option("--plugin-dir", pluginDirs, "directory to scan for *.so plugins")->expected(-1);
+    app.add_option("--set", sets,
+                   "plugin option KEY=VALUE (repeatable), e.g. --set bigtree.total=1T")
+        ->expected(-1);
     CLI11_PARSE(app, argc, argv);
 
     auto log = spdlog::default_logger();
@@ -124,6 +128,15 @@ int main(int argc, char** argv) {
         }
         if (!control.empty()) {
             host.setOption("control", control);
+        }
+        //  Generic pass-through so any plugin option is settable from the CLI.
+        for (std::string const& kv : sets) {
+            auto eq = kv.find('=');
+            if (eq == std::string::npos) {
+                log->warn("prfs-host: ignoring --set '{}' (expected KEY=VALUE)", kv);
+                continue;
+            }
+            host.setOption(kv.substr(0, eq), kv.substr(eq + 1));
         }
         prfs::host::Loader loader(host);
         for (std::string const& p : plugins) {
