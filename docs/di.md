@@ -1,0 +1,184 @@
+# prfs DI — the service registry
+
+A small, typed, C++-native **dependency-injection container**: providers register services keyed
+by `(interface-id, flavor)`; consumers resolve by interface (with an optional flavor). It is the
+substrate the plugin host ([`plugins.md`](plugins.md)) and the built-in extension points (rng
+generators, storage engines) all share — one wiring mechanism instead of three.
+
+The concepts are borrowed from the vendor **`ref_di`** reference (named import/export,
+flavors, fail-loud on unresolved, per-scope isolation, introspection) but re-expressed
+idiomatically in C++: **typed** (no `void*` vtable patching), **RAII** (scopes are objects, no
+teardown machinery), and **explicit** (no `__attribute__((constructor))` magic, no C ABI). See
+§8 for exactly what was taken and what was dropped, and why.
+
+> **Development principles (binding, design §13):** SOLID, test-first, clang-format.
+
+---
+
+## 1. Concepts
+
+- **Interface** — a C++ abstract type carrying a stable, versioned ID:
+  `static constexpr std::string_view ID = "prfs.rng/1"`. Bumping the interface = a new ID.
+- **Flavor** — an optional secondary key that selects a *variant* among providers of the same
+  interface: `engine → "lmdb"|"memory"`, `rng → "philox"|"threefry"`, `frontend →
+  "nfsv3"|"mount"`. Empty flavor = the single/default provider. Flavors are how `-Dstorage=` /
+  `-Drng=` / a `--flavor` flag choose an implementation.
+- **Provider** — an implementation registered under `(ID, flavor)`. The registry stores a
+  type-erased pointer tagged with its interface ID; the typed accessors cast it back.
+- **Registry** — owns a set of providers. The process has one default registry (`di::global()`);
+  a test constructs its own (an ordinary object) for isolation. Registries do not inherit from
+  one another.
+
+---
+
+## 2. API — `include/prfs/di.hpp`
+
+```cpp
+namespace prfs::di {
+
+struct Unresolved : std::runtime_error {          // thrown by resolve() when absent
+    Unresolved(std::string_view id, std::string_view flavor);
+};
+
+class Registry {
+public:
+    template <class I> void provide(I* impl, std::string_view flavor = "");
+    template <class I> void withdraw(std::string_view flavor = "");   // for plugin unload
+
+    template <class I> I& resolve(std::string_view flavor = "") const;    // throws Unresolved
+    template <class I> I* tryResolve(std::string_view flavor = "") const; // nullptr if absent
+    template <class I> std::vector<I*> resolveAll() const;               // every flavor of I
+
+    bool has(std::string_view id, std::string_view flavor = "") const;
+    std::vector<std::string> flavors(std::string_view id) const;  // variants of one interface
+    std::vector<std::string> ids() const;                        // all registered interfaces
+
+    //  fail-loud startup validation (see §3)
+    template <class I> void require(std::string_view flavor = "");
+    void requireAllResolved() const;   // throws once, listing every missing (id, flavor)
+};
+
+Registry& global();                    // the process-wide default registry
+
+//  convenience wrappers over global()
+template <class I> void provide(I*, std::string_view flavor = "");
+template <class I> I& resolve(std::string_view flavor = "");
+template <class I> I* tryResolve(std::string_view flavor = "");
+
+} // namespace prfs::di
+```
+
+Storage is a `map<pair<string,string>, Slot>` where `Slot = { void* impl; std::string_view id; }`;
+`provide<I>` records `{impl, I::ID}` at key `(I::ID, flavor)`, `resolve<I>` looks up `(I::ID,
+flavor)` and `static_cast<I*>`s. Type safety rests on the **ID↔type contract** — the same
+convention `ref_di` relies on, made explicit by versioning the ID.
+
+---
+
+## 3. Fail-loud (the `ref_di` sentinel idea, C++-style)
+
+`ref_di` points an unresolved interface at a vtable of `abort()+backtrace`, so a missing
+dependency crashes loudly instead of a silent null-deref. We get the same guarantee more simply,
+because we *pull*:
+
+- **`resolve<I>()` throws `di::Unresolved`** (message = interface ID + flavor) rather than
+  returning a surprise null — you cannot accidentally deref an unwired dependency.
+- **`require<I>()` + `requireAllResolved()`** — a component declares what it needs at startup;
+  the host validates once and throws listing *every* missing `(id, flavor)`. This mirrors
+  `ref_di_require_all_resolved` and turns a mid-run failure into a clear startup error.
+
+Throwing at `resolve()`/startup catches the problem at *wiring* time, before first use — so we
+don't need `ref_di`'s abort-on-call proxy.
+
+---
+
+## 4. Scopes = `Registry` instances (RAII)
+
+`ref_di` has explicit `scope_create`/`destroy`/`teardown` with orphan-root gymnastics because its
+registration is global and constructor-time, and a DSO can outlive the scope that adopted it. We
+sidestep all of that: **a scope is just a `Registry` value.**
+
+```cpp
+di::Registry r;                       // a hermetic scope
+r.provide<IStorageEngine>(&fakeEngine, "lmdb");
+// ... test against r ...
+                                      // destructor cleans up; nothing leaks to global()
+```
+
+The default `di::global()` registry wires the running host; each test builds its own and lets it
+die at end of scope. No teardown severing, no orphan roots — destructors do it. Isolation is
+structural, which fits our test-first style directly.
+
+---
+
+## 5. Registration paths
+
+- **Explicit** — the host/loader wires at startup: `di::global().provide<IStorageEngine>(&lmdb,
+  "lmdb")`.
+- **Self-register** — a `static di::Register<I>` for built-ins compiled in, kept alive by meson
+  `link_whole` (the pattern the `rng` module already uses):
+  `static di::Register<IRng> r{&philoxImpl, "philox"};`.
+- **Dynamic** — a plugin registers into the host's registry after `dlopen` and `withdraw`s on
+  unload; see [`plugins.md`](plugins.md).
+
+No `__attribute__((constructor))` — registration is either explicit or a typed static, never
+implicit macro side-effects.
+
+---
+
+## 6. Flavors vs `ref_di`
+
+`ref_di`'s flavor `select` *refines already-bound imports* and *replays* a remembered flavor list
+— machinery for its **push** model (import-slots are patched as exports arrive). Ours is **pull**:
+`resolve<I>(flavor)` is just a lookup key, chosen when the consumer asks. Simpler, and it needs no
+replay. The build/CLI sets the default flavor per interface (`-Dstorage=` → engine flavor,
+`-Drng=` → rng flavor); `resolve<I>("")` returns the unflavored provider when there is exactly
+one, else the selected default.
+
+---
+
+## 7. Threading
+
+Like `ref_di`, registration/resolution is a **single-threaded bootstrap**: wire everything at
+startup on one thread; during serving the registry is read-only, so concurrent `resolve()` is
+safe. Mutating (`provide`/`withdraw`) after bootstrap is the caller's responsibility to serialize
+(only the plugin host does it, on load/unload).
+
+---
+
+## 8. What we borrowed vs dropped (vs `ref_di`)
+
+| From `ref_di`                          | prfs `di`                                  |
+| -------------------------------------- | ------------------------------------------ |
+| named, decoupled import/export binding | ✅ `(interface-id, flavor)` keyed registry |
+| flavors (variant selection)            | ✅ kept — pull-side lookup key             |
+| unresolved sentinel (fail loud)        | ✅ `resolve` throws · `requireAllResolved` |
+| scopes (test isolation)                | ✅ a `Registry` object (RAII)              |
+| introspection / checkup                | ✅ `ids`/`flavors`/`has`/`resolveAll`      |
+| C ABI, `void*` vtable patching         | ❌ keep C++ interfaces (type-safe)         |
+| `__attribute__((constructor))` macros  | ❌ explicit or typed `Register`            |
+| dlopen/orphan-root/teardown machinery  | ❌ RAII + the plugin host handle lifetime  |
+| push-binding + flavor replay           | ❌ pull (`resolve` on demand)              |
+
+Net: `ref_di`'s decoupling + flavors + fail-loud + test-scopes, at a fraction of the code, with
+C++ type-safety and RAII intact — without undoing the "C++ interfaces + `extern "C"` factory"
+boundary decision. Conceptual credit: the vendor `ref_di` reference (BSD-3).
+
+---
+
+## 9. Relationship to the `rng` registry
+
+`rng`'s `name → Gen4` map is a special case of this: interface `IRng`, flavor = the generator
+name. Once `di` lands, rng generators become `IRng` providers and `rng::activeFn()` becomes
+`di::resolve<IRng>(activeFlavor)`. The migration is optional — the current `rng` registry already
+embodies the pattern (self-registering, `link_whole`, no central switch), so it is the working
+prototype of the `di` container.
+
+---
+
+## 10. Testing (test-first)
+
+- `provide`/`resolve` round-trip; a wrong flavor throws `Unresolved`; `tryResolve` returns null.
+- `require`/`requireAllResolved` reports *all* missing dependencies at once.
+- Two `Registry` instances are isolated — a provider in one is invisible to the other.
+- `flavors()`/`ids()`/`resolveAll()` introspection.
