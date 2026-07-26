@@ -18,6 +18,9 @@
 //    store:now() / :setTime(t)   -- logical clock (deterministic, script-driven)
 //    store:snapshot([label]) -> id   :snapInfo(id) -> {id,ctime,label}
 //    store:diffNodes(a,b)   :diffPaths(a,b)   :stats()   :fsStat()
+//    store:contentConfig() / :setContentConfig(blob)   -- FS content policy (opaque)
+//    prfs.content.config{...} -> blob   .read(blob,seed,size,off,len)   .allocatedBlocks(...)
+//    prfs.rng.setActive(name) / .active() / .names()    (both only with -Dcontent)
 //
 //    node:id() :type() :nlink() :size()/:setSize(v) :mode()/:setMode(v) (uid/gid/atime/mtime/ctime)
 //    node:target() :content() :rdev() -> (major, minor)
@@ -26,6 +29,11 @@
 #include "prfs/lua.hpp"
 #include "prfs/memstore.hpp"
 #include "prfs/prfs.hpp"
+
+#ifdef PRFS_WITH_CONTENT
+#include "prfs/content.hpp"
+#include "prfs/rng.hpp"
+#endif
 
 #include <sol/sol.hpp>
 
@@ -152,6 +160,43 @@ static sol::table fsInfoLua(sol::this_state ts) {
         i.properties);
 }
 
+#ifdef PRFS_WITH_CONTENT
+//  Build + serialize an FS content policy from a Lua table of named fields.
+static std::string contentConfigLua(sol::table t) {
+    content::ContentConfig c;
+    c.blockSize = t.get_or("blockSize", c.blockSize);
+    c.entropy = uint8_t(t.get_or("entropy", int(c.entropy)));
+    c.sparsePercent = uint8_t(t.get_or("sparsePercent", int(c.sparsePercent)));
+    c.dedupPercent = uint8_t(t.get_or("dedupPercent", int(c.dedupPercent)));
+    c.dedupCorpus = t.get_or("dedupCorpus", c.dedupCorpus);
+    return content::serialize(c);
+}
+
+//  Bytes a READ would return for a file, from a serialized config + node seed.
+static std::string contentReadLua(std::string const& cfg, uint64_t seed, uint64_t size,
+                                  uint64_t offset, size_t len) {
+    content::ContentConfig c = content::deserialize(cfg);
+    std::string out(len, '\0');
+    out.resize(content::read(c, seed, size, offset, out.data(), len));
+    return out;
+}
+
+static uint64_t contentAllocLua(std::string const& cfg, uint64_t seed, uint64_t size) {
+    return content::allocatedBlocks(content::deserialize(cfg), seed, size);
+}
+
+static sol::table rngNamesLua(sol::this_state ts) {
+    sol::state_view lua(ts);
+    sol::table out = lua.create_table();
+    int i = 1;
+
+    for (auto const& n : rng::names()) {
+        out[i++] = n;
+    }
+    return out;
+}
+#endif
+
 void registerLua(sol::state_view lua) {
     sol::table t = lua.create_named_table("prfs");
 
@@ -198,40 +243,58 @@ void registerLua(sol::state_view lua) {
             return std::make_tuple(p.first, p.second);
         });
 
-    lua.new_usertype<IPrfs>(                  //
-        "IPrfs", sol::no_constructor,         //
-        "root", &IPrfs::rwRoot,               //
-        "snapshotRoot", &IPrfs::snapshotRoot, //
-        "snapshots", &snapshotsLua,           //
-        "snapInfo", &snapInfoLua,             //
-        "mkdir", &IPrfs::mkdir,               //
-        "mkfile", &IPrfs::mkfile,             //
-        "symlink", &IPrfs::symlink,           //
-        "mknod", &IPrfs::mknod,               //
-        "mkfifo", &IPrfs::mkfifo,             //
-        "mksock", &IPrfs::mksock,             //
-        "lookup", &IPrfs::lookup,             //
-        "link", &IPrfs::link,                 //
-        "unlink", &IPrfs::unlink,             //
-        "move", &IPrfs::move,                 //
-        "setContent", &IPrfs::setContent,     //
-        "setTarget", &IPrfs::setTarget,       //
-        "setRdev", &IPrfs::setRdev,           //
-        "readdir", &readdirLua,               //
-        "readdirPage", &readdirPageLua,       //
-        "parents", &parentsLua,               //
-        "now", &IPrfs::now,                   //
-        "setTime", &IPrfs::setTime,           //
-        "snapshot", &snapshotLua,             //
-        "diffNodes", &diffNodesLua,           //
-        "diffPaths", &diffPathsLua,           //
-        "stats", &statsLua,                   //
-        "fsStat", &fsStatLua);
+    lua.new_usertype<IPrfs>(                    //
+        "IPrfs", sol::no_constructor,           //
+        "root", &IPrfs::rwRoot,                 //
+        "snapshotRoot", &IPrfs::snapshotRoot,   //
+        "snapshots", &snapshotsLua,             //
+        "snapInfo", &snapInfoLua,               //
+        "mkdir", &IPrfs::mkdir,                 //
+        "mkfile", &IPrfs::mkfile,               //
+        "symlink", &IPrfs::symlink,             //
+        "mknod", &IPrfs::mknod,                 //
+        "mkfifo", &IPrfs::mkfifo,               //
+        "mksock", &IPrfs::mksock,               //
+        "lookup", &IPrfs::lookup,               //
+        "link", &IPrfs::link,                   //
+        "unlink", &IPrfs::unlink,               //
+        "move", &IPrfs::move,                   //
+        "setContent", &IPrfs::setContent,       //
+        "setTarget", &IPrfs::setTarget,         //
+        "setRdev", &IPrfs::setRdev,             //
+        "readdir", &readdirLua,                 //
+        "readdirPage", &readdirPageLua,         //
+        "parents", &parentsLua,                 //
+        "now", &IPrfs::now,                     //
+        "setTime", &IPrfs::setTime,             //
+        "snapshot", &snapshotLua,               //
+        "diffNodes", &diffNodesLua,             //
+        "diffPaths", &diffPathsLua,             //
+        "stats", &statsLua,                     //
+        "fsStat", &fsStatLua,                   //
+        "contentConfig", &IPrfs::contentConfig, //
+        "setContentConfig", &IPrfs::setContentConfig);
 
     t["open"] = &luaOpen;
     t["mem"] = &luaMem;
     t["fsInfo"] = &fsInfoLua;
     t["SNAPSHOT_NAME"] = SNAPSHOT_NAME;
+
+#ifdef PRFS_WITH_CONTENT
+    //  prfs.content — build a config, and read the bytes a file's config yields.
+    sol::table content = lua.create_table();
+    content["config"] = &contentConfigLua;
+    content["read"] = &contentReadLua;
+    content["allocatedBlocks"] = &contentAllocLua;
+    t["content"] = content;
+
+    //  prfs.rng — the run-wide generator (di name).
+    sol::table rng = lua.create_table();
+    rng["setActive"] = [](std::string const& name) { prfs::rng::setActive(name); };
+    rng["active"] = []() { return prfs::rng::active(); };
+    rng["names"] = &rngNamesLua;
+    t["rng"] = rng;
+#endif
 }
 
 } // namespace prfs

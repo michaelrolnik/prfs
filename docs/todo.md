@@ -35,7 +35,7 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 | S10 | ✅     | Extend tests: invariant/property, determinism, crash-safety                 |
 | S11 | ✅     | `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12)                  |
 | S12 | ✅     | Statistics (§9): `FSSTAT`/`FSINFO` mapping                                  |
-| L1  | 🚧     | Content provider (`libprfs-content`) + `rng` registry: built; store-config + Lua next |
+| L1  | ✅     | Content provider (`libprfs-content`) + `rng` (di); FS config in store meta; `prfs.content` Lua |
 | L2  | ⬜     | NFS front-ends as plugins: `nfsv3`, `mount`, `nfsv4` (under the L5 host)    |
 | L3  | ⬜     | GC / compaction: reclaim superseded link-set versions + unref content       |
 | L4  | ⬜     | Dedup-ratio stats (phase-2): content refcounting                            |
@@ -80,7 +80,7 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 
 ## Later / separate modules
 
-- **L1** 🚧 — **Content provider** (`libprfs-content`) + **`rng`** registry, built & tested ([`docs/content.md`](content.md)). Config-driven generation (`ContentConfig`: blockSize/entropy/dedupPercent/sparsePercent), deterministic random-access, whole-FS dedup; `rng` = name-keyed registry of counter-based generators (Philox default + Threefry, Random123 submodule), build default `-Drng=`, run-once `setActive`. `tests/content/` (9 cases). **Next:** store the FS `ContentConfig` in `meta` (an `IPrfs` get/set) + `prfs.content` Lua bindings.
+- **L1** ✅ — **Content provider** (`libprfs-content`) + **`rng`** (di providers), built & tested ([`docs/content.md`](content.md)). Config-driven generation (`ContentConfig`: blockSize/entropy/dedupPercent/sparsePercent), deterministic random-access, whole-FS dedup; generators are `IRng` di providers (Philox default + Threefry, Random123 submodule), `-Drng=` default / `setActive`. `IPrfs::contentConfig()/setContentConfig()` persist the FS config (opaque blob) in `meta`. Lua: `store:contentConfig`/`setContentConfig`, `prfs.content.config/read/allocatedBlocks`, `prfs.rng` (gated by `-Dcontent`). Tests: `tests/content/`, `tests/core/contentconfig.cpp`, crash-suite persistence, `smoke.lua`.
 - **L5 dep** — the tool/host layer uses **spdlog** (logging) and **CLI11** (CLI) as git submodules; leaf libraries stay logging/CLI-free.
 - **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis. Includes the T1 carve-outs: `..` via-parent resolution (filehandle-encoded ancestor chain) and directory-`nlink` reporting mode (POSIX-compat default / faithful). **Threading:** naive `rpcgen` dispatch is single-threaded (static buffers, one `svc_run`) — avoid it. Options: `rpcgen -M` (MT stubs), or generate **XDR only** + our own thread-pool TCP server (self-contained, full MT control), or a **Ganesha FSAL** (Ganesha owns RPC/threading; `IPrfs` is already FSAL-shaped — least protocol code). Decide at L2.
 - **L3** ⬜ — **GC / compaction**: reclaim superseded link-set versions + unreferenced `content`/`strings`.

@@ -142,17 +142,25 @@ if get_option('lua')
         compile_args        : ['-DSOL_ALL_SAFETIES_ON=1'],
         dependencies        : [lua_dep],
     )
+    #   The content provider is optional; expose prfs.content/prfs.rng only when built.
+    lua_deps = [prfs_dep, prfs_ref_dep, prfs_nfs_dep, sol2_dep]
+    lua_args = []
+    if get_option('content')
+        lua_deps += prfs_content_dep
+        lua_args += '-DPRFS_WITH_CONTENT'
+    endif
     libprfs_lua = static_library(
         'prfs-lua',
         'src/lua/bindings.cpp',
         include_directories : prfs_inc,
         override_options    : ['warning_level=0'],  # sol2 is warning-heavy
-        dependencies        : [prfs_dep, prfs_ref_dep, prfs_nfs_dep, sol2_dep],
+        cpp_args            : lua_args,
+        dependencies        : lua_deps,
     )
     prfs_lua_dep = declare_dependency(
         link_with           : libprfs_lua,
         include_directories : prfs_inc,
-        dependencies        : [prfs_dep, prfs_ref_dep, prfs_nfs_dep, sol2_dep],
+        dependencies        : lua_deps,
     )
     prfs_test = executable(
         'prfs-test',

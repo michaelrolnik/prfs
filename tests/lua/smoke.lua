@@ -102,6 +102,29 @@ local labelled = s:snapshot("release-1")
 local si = s:snapInfo(labelled)
 assert(si.id == labelled and si.ctime == 1700000000 and si.label == "release-1")
 
+-- content provider (only when built with -Dcontent) -------------------------
+-- FS-wide content policy stored in the store (opaque blob), then read the bytes
+-- a file's content would yield from (config, node id as seed).
+if prfs.content then
+    local cfg = prfs.content.config{ blockSize = 4096, entropy = 255 }
+    s:setContentConfig(cfg)
+    assert(s:contentConfig() == cfg, "content config round-trips through the store")
+
+    local big = s:mkfile("")
+    big:setSize(10000)
+    local bytes = prfs.content.read(s:contentConfig(), big:id(), big:size(), 0, 10000)
+    assert(#bytes == 10000, "READ returns size bytes")
+    assert(prfs.content.read(s:contentConfig(), big:id(), big:size(), 0, 100)
+        == string.sub(bytes, 1, 100), "random-access READ matches the full read")
+
+    -- entropy=0 → constant (all zero); a sparse file allocates fewer blocks
+    local zcfg = prfs.content.config{ blockSize = 512, entropy = 0, sparsePercent = 100 }
+    assert(prfs.content.allocatedBlocks(zcfg, big:id(), 512 * 8) == 0, "all holes → 0 blocks")
+
+    -- rng selection is a di name
+    assert(#prfs.rng.names() >= 2 and prfs.rng.active() ~= nil)
+end
+
 -- synthesized .snapshot directory -------------------------------------------
 local sd = s:lookup(root, prfs.SNAPSHOT_NAME)
 assert(sd and sd:type() == prfs.Type.DIR and sd:mode() == 0x16d) -- 0555
