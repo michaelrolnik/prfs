@@ -543,3 +543,74 @@ TEST(NfsV3, TimeAdvance) {
     ::close(fd);
     loader.stopAll();
 }
+
+//  Browsing `.snapshot/N` must yield the node's snapshot view, with a distinct
+//  fsid — otherwise the client sees it as the live node and loops (ELOOP).
+TEST(NfsV3, SnapshotBrowse) {
+    const int port = 34569;
+
+    auto fs = makeMemStore();
+    auto root = fs->rwRoot();
+    auto before = fs->mkfile("");
+    before->size(10);
+    ASSERT_EQ(fs->link(root, "before.txt", before), Error::OK);
+    SnapId snap = fs->snapshot("s1");
+    auto after = fs->mkfile("");
+    after->size(20);
+    ASSERT_EQ(fs->link(root, "after.txt", after), Error::OK);
+
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV3_PLUGIN_SO));
+    loader.startServices();
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    Reply mnt = rpc(fd, PROG_MOUNT, MOUNT_V3, 1, strArg("/"));
+    ASSERT_EQ(mnt.astat, 0u);
+    uint64_t rid = get64(&mnt.body[8]);
+    uint64_t rs = get64(&mnt.body[16]);
+
+    auto lookup = [&](uint64_t id, uint64_t sn, std::string const& name) {
+        std::vector<uint8_t> a = fhArg(id, sn);
+        std::vector<uint8_t> n = strArg(name);
+        a.insert(a.end(), n.begin(), n.end());
+        return rpc(fd, PROG_NFS, NFS_V3, 3, a);
+    };
+
+    //  Live root reports fsid 0.
+    Reply grt = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(rid, rs));
+    EXPECT_EQ(get64(&grt.body[4 + 44]), 0u);
+
+    //  LOOKUP .snapshot → the synthesized snapshot directory.
+    Reply lss = lookup(rid, rs, SNAPSHOT_NAME);
+    ASSERT_EQ(get32(&lss.body[0]), 0u) << "LOOKUP .snapshot";
+    uint64_t sdId = get64(&lss.body[8]);
+    uint64_t sdSnap = get64(&lss.body[16]);
+
+    //  LOOKUP .snapshot/<snap> → the root viewed at that snapshot. The fh must
+    //  carry the snapshot, not LATEST (this is the bug).
+    Reply lv = lookup(sdId, sdSnap, std::to_string(snap));
+    ASSERT_EQ(get32(&lv.body[0]), 0u) << "LOOKUP .snapshot/N";
+    uint64_t vId = get64(&lv.body[8]);
+    uint64_t vSnap = get64(&lv.body[16]);
+    EXPECT_EQ(vId, rid);    // same node (root) …
+    EXPECT_EQ(vSnap, snap); // … but reading snapshot `snap`, not LATEST
+
+    //  GETATTR the snapshot root: a DIR whose fsid is the snapshot (≠ live 0), so
+    //  its (fsid, fileid) differs from the live root — no loop.
+    Reply gv = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(vId, vSnap));
+    EXPECT_EQ(get32(&gv.body[4]), 2u);        // NF3DIR
+    EXPECT_EQ(get64(&gv.body[4 + 44]), snap); // snapshot fsid
+
+    //  The snapshot view is the pre-snapshot tree: before.txt present, after.txt
+    //  absent; the live tree has both.
+    EXPECT_EQ(get32(&lookup(vId, vSnap, "before.txt").body[0]), 0u); // OK
+    EXPECT_EQ(get32(&lookup(vId, vSnap, "after.txt").body[0]), 2u);  // NOENT
+    EXPECT_EQ(get32(&lookup(rid, rs, "after.txt").body[0]), 0u);     // live has it
+
+    ::close(fd);
+    loader.stopAll();
+}

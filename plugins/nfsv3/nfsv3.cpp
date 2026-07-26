@@ -290,8 +290,12 @@ void encodeFattr(Writer& w, INode& n) {
     w.u64(n.size()); // used ≈ size (content is synthetic)
     w.u32(maj);      // specdata3.specdata1
     w.u32(min);      // specdata3.specdata2
-    w.u64(0);        // fsid
-    w.u64(n.id());   // fileid
+    //  fsid distinguishes each snapshot from the live tree: a node's (fsid,
+    //  fileid) must be unique, but fileid (the nodeID) repeats across snapshot
+    //  views — so a snapshot view gets its snapId as fsid (live = 0). Without
+    //  this the client sees `/.snapshot/N` as the same object as `/` (ELOOP).
+    w.u64(n.snap() == LATEST ? 0 : n.snap()); // fsid
+    w.u64(n.id());                            // fileid
     w.time(n.atime());
     w.time(n.mtime());
     w.time(n.ctime());
@@ -709,9 +713,12 @@ private:
             return SUCCESS;
         }
         w.u32(NFS3_OK);
-        w.fh(child->id(), snap);      // object fh keeps the dir's snap view
-        encodePostOp(w, child.get()); // obj_attributes
-        encodePostOp(w, dir.get());   // dir_attributes
+        //  Use the child's OWN snap view, not the parent request's: descending
+        //  into `.snapshot/N` yields a child at snapshot N (fh reads that view),
+        //  while live lookups keep LATEST.
+        w.fh(child->id(), child->snap()); // object fh
+        encodePostOp(w, child.get());     // obj_attributes
+        encodePostOp(w, dir.get());       // dir_attributes
         return SUCCESS;
     }
 
@@ -873,9 +880,9 @@ private:
             w.u64(e.fileid);
             w.str(e.name);
             w.u64(e.cookie);
-            encodePostOp(w, e.node.get()); // name_attributes
-            w.u32(1);                      // name_handle present
-            w.fh(e.node->id(), snap);
+            encodePostOp(w, e.node.get());      // name_attributes
+            w.u32(1);                           // name_handle present
+            w.fh(e.node->id(), e.node->snap()); // child's own snap view
             budget += esz;
         }
         w.u32(0); // end of entries
