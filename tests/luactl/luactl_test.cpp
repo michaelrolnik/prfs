@@ -100,6 +100,22 @@ TEST(LuaCtl, ConsoleEvalAndMutate) {
     //  … and on the same store the test holds.
     EXPECT_TRUE(fs->lookup(fs->rwRoot(), "hi"));
 
+    //  A SECOND console connects while the first is still open — thread-per-
+    //  connection, so it gets its banner without the first disconnecting (this
+    //  would block if sessions were serialized). It sees the first's mutation …
+    int fd2 = connectUnix(sock);
+    ASSERT_GE(fd2, 0);
+    recvLine(fd2); // banner
+    sendLine(fd2, "fs:lookup(fs:root(), 'hi') ~= nil");
+    EXPECT_EQ(recvLine(fd2), "true");
+
+    //  … and a mutation on the second is visible on the first (one store).
+    sendLine(fd2, "fs:link(fs:root(), 'hi2', fs:mkdir())");
+    EXPECT_EQ(recvLine(fd2), "0"); // Error.OK
+    sendLine(fd, "fs:lookup(fs:root(), 'hi2') ~= nil");
+    EXPECT_EQ(recvLine(fd), "true");
+
+    ::close(fd2);
     ::close(fd);
     loader.stopAll();
     ::unlink(sock.c_str());

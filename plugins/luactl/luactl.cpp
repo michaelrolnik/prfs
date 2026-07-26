@@ -12,8 +12,9 @@
 //      echo 'print(fs:stats().links)' | socat - UNIX-CONNECT:/tmp/prfs.sock
 //
 //  Each evaluated line runs under the host's EXCLUSIVE store lock (the console
-//  may mutate), so console and NFS access are serialized. Connections are served
-//  one at a time — this is an admin channel, not a throughput path. The socket
+//  may mutate), so console and NFS access are serialized. Each connection gets
+//  its own worker thread and its own Lua state, so multiple consoles run at
+//  once; store access between them is still serialized by the lock. The socket
 //  path comes from the "control" option (default /tmp/prfs.sock).
 //
 #include "prfs/lua.hpp"
@@ -28,10 +29,12 @@
 
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 using namespace prfs;
@@ -105,7 +108,21 @@ public:
             m_listen = -1;
         }
         if (m_thread.joinable()) {
-            m_thread.join();
+            m_thread.join(); // accept loop has exited — no more sessions start
+        }
+        //  Unblock every live session's recv(), then join them all.
+        std::vector<std::unique_ptr<Session>> sessions;
+        {
+            std::lock_guard<std::mutex> lk(m_mtx);
+            for (auto& s : m_sessions) {
+                ::shutdown(s->fd, SHUT_RDWR);
+            }
+            sessions.swap(m_sessions);
+        }
+        for (auto& s : sessions) {
+            if (s->th.joinable()) {
+                s->th.join();
+            }
         }
         if (!m_path.empty()) {
             ::unlink(m_path.c_str());
@@ -113,14 +130,43 @@ public:
     }
 
 private:
+    //  One connection's worker thread; `done` flips true as its last act so the
+    //  accept loop can reap (join) it without blocking.
+    struct Session {
+        std::thread th;
+        int fd = -1;
+        std::atomic<bool> done{false};
+    };
+
     void serve() {
         while (m_running) {
             int c = ::accept(m_listen, nullptr, nullptr);
             if (c < 0) {
                 break; // listen fd closed by stop()
             }
-            session(c);
-            ::close(c);
+            auto s = std::make_unique<Session>();
+            s->fd = c;
+            Session* p = s.get();
+            s->th = std::thread([this, p, c] {
+                session(c); // one Lua REPL per connection, concurrent with others
+                ::close(c);
+                p->done.store(true);
+            });
+            std::lock_guard<std::mutex> lk(m_mtx);
+            reap();
+            m_sessions.push_back(std::move(s));
+        }
+    }
+
+    //  Join and drop finished sessions. Caller holds m_mtx.
+    void reap() {
+        for (auto it = m_sessions.begin(); it != m_sessions.end();) {
+            if ((*it)->done.load()) {
+                (*it)->th.join();
+                it = m_sessions.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -204,7 +250,9 @@ private:
     std::string m_path;
     int m_listen = -1;
     std::atomic<bool> m_running{false};
-    std::thread m_thread;
+    std::thread m_thread; // accept loop
+    std::mutex m_mtx;     // guards m_sessions
+    std::vector<std::unique_ptr<Session>> m_sessions;
 };
 
 class LuaCtlPlugin : public IPlugin {
