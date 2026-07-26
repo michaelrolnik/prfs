@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <set>
+#include <stdexcept>
 #include <string>
 
 using namespace prfs;
@@ -34,7 +35,7 @@ size_t distinct(std::string const& s) { return std::set<char>(s.begin(), s.end()
 //  Every test starts from the default generator so ordering can't leak state.
 class ContentTest : public ::testing::Test {
 protected:
-    void SetUp() override { rng::setActive(rng::Kind::Philox); }
+    void SetUp() override { rng::setActive("philox"); }
 };
 
 TEST_F(ContentTest, Deterministic) {
@@ -141,18 +142,21 @@ TEST_F(ContentTest, ConfigRoundTrip) {
 TEST_F(ContentTest, RngIsConfigurable) {
     ContentConfig c; // full entropy
 
-    rng::setActive(rng::Kind::Philox);
+    rng::setActive("philox");
     std::string p = gen(c, 42, 4096);
     EXPECT_EQ(p, gen(c, 42, 4096)); // deterministic per generator
 
-    rng::setActive(rng::Kind::Threefry);
+    rng::setActive("threefry");
     std::string t = gen(c, 42, 4096);
     EXPECT_EQ(t, gen(c, 42, 4096));
     EXPECT_NE(p, t); // switching the generator changes the bytes
+}
 
-    rng::Kind k;
-    EXPECT_TRUE(rng::parse("threefry", k));
-    EXPECT_EQ(k, rng::Kind::Threefry);
-    EXPECT_FALSE(rng::parse("bogus", k));
-    EXPECT_STREQ(rng::name(rng::Kind::Philox), "philox");
+TEST_F(ContentTest, RngRegistry) {
+    // Built-ins self-registered (statically linked via link_whole).
+    EXPECT_TRUE(rng::has("philox"));
+    EXPECT_TRUE(rng::has("threefry"));
+    EXPECT_FALSE(rng::has("bogus"));
+    EXPECT_GE(rng::names().size(), 2u);
+    EXPECT_THROW(rng::setActive("bogus"), std::out_of_range);
 }

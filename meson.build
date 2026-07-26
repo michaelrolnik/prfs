@@ -86,15 +86,16 @@ if get_option('content')
     #   rng — counter-based generators (Philox/Threefry) behind one API, one file
     #   per generator. Wraps the Random123 submodule; -Drng picks the default.
     r123_inc = include_directories('third_party/random123/include', is_system : true)
-    rng_default = 'PRFS_RNG_' + get_option('rng').to_upper()
     libprfs_rng = static_library(
         'prfs-rng',
         files('src/rng/rng.cpp', 'src/rng/philox.cpp', 'src/rng/threefry.cpp'),
         include_directories : [prfs_inc, r123_inc],
-        cpp_args            : ['-DPRFS_DEFAULT_RNG=' + rng_default],
+        cpp_args            : ['-DPRFS_DEFAULT_RNG="' + get_option('rng') + '"'],
     )
+    #   link_whole keeps the generators' self-registration objects — nothing
+    #   references them directly, so a plain link would drop them (open/closed).
     prfs_rng_dep = declare_dependency(
-        link_with           : libprfs_rng,
+        link_whole          : libprfs_rng,
         include_directories : prfs_inc,
     )
     libprfs_content = static_library(

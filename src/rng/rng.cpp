@@ -2,45 +2,63 @@
 // Copyright (c) 2026 Michael Rolnik <mrolnik@gmail.com>
 
 //
-//  rng registry — maps Kind → generator, and holds the run-wide active choice.
-//  The generators themselves live one-per-file (philox.cpp, threefry.cpp).
+//  rng registry — the name → generator map and the run-wide active choice. The
+//  generators live one-per-file (philox.cpp, threefry.cpp) and self-register;
+//  this file holds no list of them.
 //
 #include "prfs/rng.hpp"
 
-//  Build-time default (meson -Drng=…). PRFS_DEFAULT_RNG expands to one of these.
-#define PRFS_RNG_PHILOX 0
-#define PRFS_RNG_THREEFRY 1
+#include <map>
+#include <stdexcept>
+
+//  Build-time default generator name (meson -Drng=…).
 #ifndef PRFS_DEFAULT_RNG
-#define PRFS_DEFAULT_RNG PRFS_RNG_PHILOX
+#define PRFS_DEFAULT_RNG "philox"
 #endif
 
 namespace prfs::rng {
-
-void philoxGen4(uint32_t const[4], uint32_t const[2], uint32_t[4]);
-void threefryGen4(uint32_t const[4], uint32_t const[2], uint32_t[4]);
-
 namespace {
-Kind s_active = Kind(PRFS_DEFAULT_RNG);
+
+//  Function-local static ⇒ constructed on first use, so a generator's static
+//  Register can call add() during static init with no order-of-init hazard.
+std::map<std::string, Gen4, std::less<>>& registry() {
+    static std::map<std::string, Gen4, std::less<>> m;
+    return m;
 }
 
-Gen4 fn(Kind k) { return k == Kind::Threefry ? &threefryGen4 : &philoxGen4; }
+std::string s_active;
 
-char const* name(Kind k) { return k == Kind::Threefry ? "threefry" : "philox"; }
+} // namespace
 
-bool parse(std::string_view s, Kind& out) {
-    if (s == "philox") {
-        out = Kind::Philox;
-        return true;
+void add(std::string_view name, Gen4 g) { registry()[std::string(name)] = g; }
+
+bool has(std::string_view name) { return registry().find(name) != registry().end(); }
+
+Gen4 get(std::string_view name) {
+    auto it = registry().find(name);
+    if (it == registry().end()) {
+        throw std::out_of_range("rng: unknown generator '" + std::string(name) + "'");
     }
-    if (s == "threefry") {
-        out = Kind::Threefry;
-        return true;
-    }
-    return false;
+    return it->second;
 }
 
-Kind active() { return s_active; }
+std::vector<std::string> names() {
+    std::vector<std::string> out;
+    for (auto const& [name, gen] : registry()) {
+        out.push_back(name);
+    }
+    return out;
+}
 
-void setActive(Kind k) { s_active = k; }
+std::string active() { return s_active.empty() ? PRFS_DEFAULT_RNG : s_active; }
+
+void setActive(std::string_view name) {
+    if (!has(name)) {
+        throw std::out_of_range("rng: unknown generator '" + std::string(name) + "'");
+    }
+    s_active = std::string(name);
+}
+
+Gen4 activeFn() { return get(active()); }
 
 } // namespace prfs::rng

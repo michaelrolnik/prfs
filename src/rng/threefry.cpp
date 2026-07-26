@@ -4,13 +4,15 @@
 //
 //  Threefry4x32-20 (Random123) — an alternative counter-based generator (a
 //  reduced-round Threefish). Same random-access contract as Philox; its 4×u32
-//  key takes the 64-bit content seed in its low two words.
+//  key takes the 64-bit content seed in its low two words. Registers as
+//  "threefry".
 //
 #include "prfs/rng.hpp"
 
 #include <Random123/threefry.h>
 
 namespace prfs::rng {
+namespace {
 
 void threefryGen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) {
     threefry4x32_ctr_t ctr = {{c[0], c[1], c[2], c[3]}};
@@ -22,4 +24,7 @@ void threefryGen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) {
     out[3] = r.v[3];
 }
 
+Register const reg{"threefry", &threefryGen4};
+
+} // namespace
 } // namespace prfs::rng

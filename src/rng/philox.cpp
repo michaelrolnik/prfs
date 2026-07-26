@@ -3,13 +3,14 @@
 
 //
 //  Philox4x32-10 (Random123) — the default counter-based generator: BigCrush
-//  quality, fast, SIMD-friendly, random-access. Key = 2×u32, counter = 4×u32.
+//  quality, fast, SIMD-friendly, random-access. Self-registers as "philox".
 //
 #include "prfs/rng.hpp"
 
 #include <Random123/philox.h>
 
 namespace prfs::rng {
+namespace {
 
 void philoxGen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) {
     philox4x32_ctr_t ctr = {{c[0], c[1], c[2], c[3]}};
@@ -21,4 +22,7 @@ void philoxGen4(uint32_t const c[4], uint32_t const k[2], uint32_t out[4]) {
     out[3] = r.v[3];
 }
 
+Register const reg{"philox", &philoxGen4};
+
+} // namespace
 } // namespace prfs::rng

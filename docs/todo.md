@@ -35,10 +35,11 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 | S10 | ✅     | Extend tests: invariant/property, determinism, crash-safety                 |
 | S11 | ✅     | `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12)                  |
 | S12 | ✅     | Statistics (§9): `FSSTAT`/`FSINFO` mapping                                  |
-| L1  | 🚧     | Content provider (`libprfs_content`): doc done (content.md), impl next      |
-| L2  | ⬜     | NFS front-end: v3 first; v4 subset or NFS-Ganesha FSAL                      |
+| L1  | 🚧     | Content provider (`libprfs-content`) + `rng` registry: built; store-config + Lua next |
+| L2  | ⬜     | NFS front-ends as plugins: `nfsv3`, `mount`, `nfsv4` (under the L5 host)    |
 | L3  | ⬜     | GC / compaction: reclaim superseded link-set versions + unref content       |
 | L4  | ⬜     | Dedup-ratio stats (phase-2): content refcounting                            |
+| L5  | ⬜     | Plugin host + API (plugins.md): loader, CLI11+spdlog, `null` test front-end |
 
 ---
 
@@ -79,7 +80,9 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 
 ## Later / separate modules
 
-- **L1** 🚧 — **Content provider** (`libprfs_content`). Design doc done: [`docs/content.md`](content.md) — recipe = extent list of procedural recipes (§11.2), deterministic random-access generator (counter-based mixer), patterns hole/zero/fill/random/dedup, size authority (T7), block size (D3), API + test plan. **Next: implement test-first** (`src/content/`, `tests/content/`, Lua `prfs.content`).
+- **L1** 🚧 — **Content provider** (`libprfs-content`) + **`rng`** registry, built & tested ([`docs/content.md`](content.md)). Config-driven generation (`ContentConfig`: blockSize/entropy/dedupPercent/sparsePercent), deterministic random-access, whole-FS dedup; `rng` = name-keyed registry of counter-based generators (Philox default + Threefry, Random123 submodule), build default `-Drng=`, run-once `setActive`. `tests/content/` (9 cases). **Next:** store the FS `ContentConfig` in `meta` (an `IPrfs` get/set) + `prfs.content` Lua bindings.
+- **L5 dep** — the tool/host layer uses **spdlog** (logging) and **CLI11** (CLI) as git submodules; leaf libraries stay logging/CLI-free.
 - **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis. Includes the T1 carve-outs: `..` via-parent resolution (filehandle-encoded ancestor chain) and directory-`nlink` reporting mode (POSIX-compat default / faithful). **Threading:** naive `rpcgen` dispatch is single-threaded (static buffers, one `svc_run`) — avoid it. Options: `rpcgen -M` (MT stubs), or generate **XDR only** + our own thread-pool TCP server (self-contained, full MT control), or a **Ganesha FSAL** (Ganesha owns RPC/threading; `IPrfs` is already FSAL-shaped — least protocol code). Decide at L2.
 - **L3** ⬜ — **GC / compaction**: reclaim superseded link-set versions + unreferenced `content`/`strings`.
 - **L4** ⬜ — **Dedup-ratio stats** (phase-2): content refcounting (`logicalSize` vs `physicalSize`).
+- **L5** ⬜ — **Plugin host + API** ([`docs/plugins.md`](plugins.md)): C++ interfaces + `extern "C"` factory (ABI-versioned), a loader (built-in registry + `dlopen`), plugins contribute CLI args (`options()` → CLI11), CLI11+spdlog host layer, and a `null` front-end for test-first wiring. L2's NFS front-ends are plugins under this host. Light extensions (rng, engines) use the registry tier instead.
