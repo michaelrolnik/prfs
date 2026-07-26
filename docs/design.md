@@ -302,12 +302,14 @@ future work.
 Cost: two read paths and two write paths for links (COW vs LOG) — the price for keeping the
 common case (small dirs) simple and the rare large-churny case cheap to write.
 
-**Single-model alternative — bucketed COW.** Instead of two modes, *always* COW but
-partition a directory's entries into buckets by `hash(stringID)` and copy only the touched
-bucket (`containerID ‖ bucketNo ‖ bucketVer ‖ stringID`). Copy cost is bounded to one
-bucket regardless of fan-out, with one read/write model and no tombstones; the cost is a
-bucket dimension in the keys and per-bucket versioning. Bucket count is 1 for ordinary dirs
-(identical to §3.3) and larger for dirs you build big. See §11 for the open decision.
+**Chosen scaling path — bucketed COW (decided, §11.1).** Rather than two link modes, *always*
+COW but partition a directory's entries into buckets and copy only the touched bucket
+(`containerID ‖ bucketNo ‖ bucketVer ‖ stringID`). Copy cost is bounded to one bucket
+regardless of fan-out, with one read/write model and no tombstones. Buckets are partitioned by
+**name range** (not `hash(stringID)`), so entries stay globally name-ordered and the §6.2
+`readdir` name cursor stays stable. Bucket count is **1** for ordinary dirs (byte-identical to
+§3.3, and what v1 ships) and larger for dirs built big. The per-directory LOG mode above is
+kept as a documented alternative but is **not** the chosen path.
 
 ---
 
@@ -353,11 +355,12 @@ Notes:
   its effective `(container, dnLinkVer)` prefix. LOG-mode dirs (§3.4) instead key entries
   by `container ‖ stringID ‖ snapId` with a live/deleted flag — the `linkMode` attr says
   which representation a directory uses.
-- **`linkMode` is reserved, not yet stored.** The COW-vs-LOG-vs-bucketed hybrid (§3.4/§11)
-  is undecided, so the current implementation is **pure COW** and `NodeRec` carries no
-  `linkMode` field. The name is held in the schema for the eventual per-directory strategy;
-  until that decision lands, treat directories as COW-only. Adding it later is a record-format
-  bump behind the existing versioning, not a redesign.
+- **`linkMode` / bucket-count is reserved, not yet stored.** The scaling strategy is decided —
+  range-partitioned bucketed COW (§11.1) — but only the **single-bucket** case (byte-identical
+  to pure COW, §3.3) is implemented, so `NodeRec` carries no `linkMode`/bucket-count field yet.
+  The names are held in the schema for the multi-bucket path; until it lands, every directory is
+  single-bucket COW. Adding the field later is a record-format bump behind the existing
+  versioning, not a redesign.
 - `nodes.spec` is polymorphic by `type` (§2.1): `stringID` (`LNK`), packed device number
   (`BLK`/`CHR`), `contentID` (`REG`), or `0`.
 - `strings` and `content` are twin interned tables — immutable, hash-deduplicated,
@@ -691,23 +694,58 @@ touching the store.
 
 ---
 
-## 11. Open questions
+## 11. Decisions
 
-- **Hybrid link-set strategy (§3.4)** — do test scenarios repeatedly mutate *large*
-  directories across snapshots? If not, pure COW (§3.3) is optimal and simplest. If yes,
-  pick: **per-directory COW/LOG mode** (matches "sometimes copy, sometimes don't"; two code
-  paths) or **bucketed COW** (one model, bounded copy). Decision pending.
-- **Content layout** — is the `content` block structure a **procedural recipe**
-  (seed + compress/dedup/sparse knobs) or an **explicit extent list**, or both? Format is
-  the content provider's concern; the store only interns the bytes.
-- **Block size** — per fs / folder / file? Leaning: a denormalized `blockSize` node
-  attribute (feeds `st_blksize`/`st_blocks`), resolved at create time. Not yet in the schema.
-- **GC** — with copy-on-write link sets, a whole `(container, dnLinkVer)` set becomes
-  droppable at once when no surviving snapshot references it; likewise superseded
-  `content`/`strings` entities. A compaction pass is the main mitigation for §3.3/§3.4
-  amplification — future work.
-- **Content provider contract** — the block-structure format and the block/pattern model
-  (ZERO/ONE/RANDOM/SEEDED/DEDUP) live outside this library and need their own doc.
+The §11 open questions are resolved below. Each fixes a direction now (so nothing built
+before its implementation can violate it) while deferring the build itself where sensible.
+
+### 11.1 Link-set scaling — **range-partitioned bucketed COW** (D1)
+
+The workload is real: a test target builds large trees, and archive tools run incrementals —
+i.e. *large directories mutated a little across many snapshots*, exactly the case where pure
+COW (§3.3) re-copies a whole set per snapshot. So we commit to a scaling strategy rather than
+staying pure-COW-only.
+
+Chosen: **bucketed COW**, not per-directory COW/LOG mode. One read/write path (LOG mode's two
+paths are more bug surface and accumulate tombstones), copy cost bounded to one bucket, no
+tombstones. Buckets are partitioned by **name range**, not `hash(stringID)` — so entries stay
+globally name-ordered and the §6.2 `readdir` **name cursor stays stable** (a hash split would
+break it). v1 ships **one bucket per directory**, byte-identical to §3.3; a directory built
+big (generator hint or a fan-out threshold) gets more buckets and COWs only the touched one.
+`linkMode`/bucket-count stays reserved (§5, T8) until the multi-bucket path is implemented.
+
+### 11.2 Content layout — **extent list of procedural recipes** (D2)
+
+Both, composed: a `content` block structure is an **ordered list of extents**, and each extent
+is a **procedural recipe** `{ pattern, seed, params, length }` (patterns ZERO/ONE/RANDOM/
+SEEDED/DEDUP). The common whole-file-from-one-seed case is a single extent; a `HOLE` extent
+models sparseness; an extent referencing a shared block recipe models block-level dedup. This
+is size-parametric (§2.1): the node's `size` bounds how many bytes the provider emits. The
+store still only interns opaque bytes; the concrete format is the content provider's (L1).
+
+### 11.3 Block size — **fs-global default + per-file override, denormalized** (D3)
+
+One fs-level default block size (feeds `statfs f_bsize` and the FSINFO transfer granularity,
+§9); a `REG` node may override it via its recipe for dedup-boundary tests. The effective
+`blockSize` is resolved at create and **denormalized onto the node** so `st_blksize`/`st_blocks`
+are O(1) and reproducible. Not per-directory (rarely useful, adds a resolution step). The
+`blockSize` node field is reserved until L1 lands (like `linkMode`).
+
+### 11.4 GC — **invariant fixed now, compaction later** (D5)
+
+Invariant: *an entity version is reclaimable iff no retained snapshot resolves to it.* Under
+range-back reads, for each id the newest version `≤` each retained snapshot is live; any
+version no retained snapshot selects is garbage — and a whole `(container, bucketVer)` set
+drops at once when unreferenced. Consequences: (a) with **all** snapshots retained (v1 has no
+snapshot deletion) nothing is collectable, so GC is inert until snapshot **pruning** exists;
+(b) `content`/`strings` entities need **refcounting** (§9 phase-2) before they can be dropped.
+Compaction is a later background pass; stating the invariant now keeps every earlier feature
+GC-safe by construction.
+
+### 11.5 Content provider contract (L1)
+
+The block-structure format and the block/pattern model live **outside this library** and get
+their own doc/module (`libprfs_content`, todo L1), consuming the §11.2 extent/recipe layout.
 
 ---
 

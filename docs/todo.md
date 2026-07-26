@@ -18,11 +18,11 @@ Status: ✅ done · ⬜ open.
 | T7  | ✅     | `size` vs content-block-structure authority (fixes B7)                      |
 | T8  | ✅     | Mark `linkMode` reserved / defer (fixes B8)                                 |
 | T9  | ⬜     | Define `Error`, `Stats`, `Options` when fleshing design §7                  |
-| D1  | ⬜     | Hybrid link-set: pure COW vs per-dir COW/LOG vs bucketed COW                |
-| D2  | ⬜     | Content layout: procedural recipe vs explicit extent list vs both           |
-| D3  | ⬜     | Block size: per fs/folder/file; denormalized `blockSize` at create?         |
+| D1  | ✅     | Link-set scaling: range-partitioned bucketed COW (design §11.1)             |
+| D2  | ✅     | Content layout: extent list of procedural recipes (design §11.2)            |
+| D3  | ✅     | Block size: fs-global default + per-file override, denormalized (§11.3)      |
 | D4  | ✅     | `changes`: candidate index + state-comparison (design §6.1)                 |
-| D5  | ⬜     | GC: write the invariant into the design now; compaction later               |
+| D5  | ✅     | GC: invariant fixed now, compaction later (design §11.4)                    |
 | S1  | ✅     | Repo skeleton + Meson build                                                 |
 | S2  | ✅     | `INode`/`IPrfs` interface headers                                           |
 | S3  | ✅     | In-memory reference model / oracle                                          |
@@ -54,13 +54,13 @@ Status: ✅ done · ⬜ open.
 - **T8** ✅ — `linkMode` marked **reserved** in the schema; implementation is pure COW and `NodeRec` carries no `linkMode` field, so the schema no longer commits to the undecided §3.4 hybrid (design §5). Fixes B8.
 - **T9** ⬜ — define `Error`, `Stats`, `Options` when fleshing design §7.
 
-## Open decisions (design §11)
+## Decisions (design §11)
 
-- **D1** ⬜ — Hybrid link-set: pure COW vs per-dir COW/LOG vs bucketed COW. (Deciding input: are large directories mutated across snapshots?)
-- **D2** ⬜ — Content layout: procedural recipe vs explicit extent list vs both.
-- **D3** ⬜ — Block size: per fs/folder/file; denormalized `blockSize` attr resolved at create time?
-- **D4** ✅ — `changes`: decided — candidate index + state-comparison (design §6.1).
-- **D5** ⬜ — GC: write the invariant into the design now; implement compaction later.
+- **D1** ✅ — Link-set scaling: **range-partitioned bucketed COW** (design §11.1). One read/write path, copy bounded to the touched bucket, buckets partitioned by name range so the §6.2 readdir cursor stays stable. v1 ships single-bucket (== pure COW §3.3); multi-bucket + `linkMode`/bucket-count reserved.
+- **D2** ✅ — Content layout: **extent list of procedural recipes** (design §11.2). Ordered extents, each `{pattern, seed, params, length}`; single extent = whole-file-one-seed; HOLE extent = sparse; shared block recipe = dedup. Format is L1's.
+- **D3** ✅ — Block size: **fs-global default + per-file override, denormalized on the node** (design §11.3). Not per-directory; `blockSize` node field reserved until L1.
+- **D4** ✅ — `changes`: candidate index + state-comparison (design §6.1).
+- **D5** ✅ — GC: **invariant fixed now, compaction later** (design §11.4). Reclaimable ⟺ no retained snapshot resolves to it; inert until snapshot pruning + content refcounting exist.
 
 ## Scaffolding (once the critical/high gaps are closed)
 
