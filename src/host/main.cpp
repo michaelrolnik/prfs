@@ -7,12 +7,17 @@
 //  SIGINT/SIGTERM and shuts them down.
 //
 //  Usage:
-//    prfs-host [--store PATH] [--clean] [--engine NAME] [--port N] \
-//              [--plugin FILE.so]... [--plugin-dir DIR]...
+//    prfs-host [--store PATH] [--clean] [--engine NAME] [--port N] [--time SECS] \
+//              [--control PATH] [--plugin FILE.so]... [--plugin-dir DIR]...
 //
 //  Plugin discovery: --plugin loads a specific .so; --plugin-dir loads every
 //  *.so in a directory. If neither is given, prfs-host scans its own directory
 //  (so `./build/prfs-host` finds `./build/*.so`).
+//
+//  --time seeds the store's logical clock (epoch seconds). New nodes stamp their
+//  atime/mtime/ctime with it, so `ls -l` shows real dates instead of 1970. The
+//  clock stays deterministic — it does not advance on its own; pass e.g.
+//  `--time $(date +%s)` to anchor it to now.
 //
 #include "prfs/host.hpp"
 #include "prfs/prfs.hpp"
@@ -23,6 +28,7 @@
 #include <algorithm>
 #include <atomic>
 #include <csignal>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <unistd.h>
@@ -75,6 +81,7 @@ int main(int argc, char** argv) {
     std::string engine;
     bool clean = false;
     int port = 0;
+    int64_t clockSecs = -1;
     std::string control;
     std::vector<std::string> plugins;
     std::vector<std::string> pluginDirs;
@@ -83,6 +90,7 @@ int main(int argc, char** argv) {
     app.add_flag("--clean", clean, "wipe the store on open");
     app.add_option("--engine", engine, "storage engine (di name): lmdb | memory");
     app.add_option("--port", port, "TCP port for NFS/MOUNT services (default 2049)");
+    app.add_option("--time", clockSecs, "seed the logical clock (epoch seconds); new nodes use it");
     app.add_option("--control", control, "unix socket path for the luactl Lua console");
     app.add_option("--plugin", plugins, "front-end plugin .so to load")->expected(-1);
     app.add_option("--plugin-dir", pluginDirs, "directory to scan for *.so plugins")->expected(-1);
@@ -97,6 +105,10 @@ int main(int argc, char** argv) {
         prfs::Options opts;
         opts.clean = clean;
         auto fs = prfs::openPrfs(store, opts);
+
+        if (clockSecs >= 0) {
+            fs->setTime(uint64_t(clockSecs)); // seed the deterministic logical clock
+        }
 
         prfs::host::Host host(*fs, *log);
         if (port != 0) {
