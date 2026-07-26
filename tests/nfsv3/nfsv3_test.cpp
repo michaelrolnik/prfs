@@ -276,12 +276,21 @@ TEST(NfsV3, MountWalkStat) {
             o += 8; // cookie
         }
         EXPECT_EQ(get32(&dd.body[o + 4]), 1u); // eof
-        EXPECT_EQ(names.size(), 5u);           // ".", "..", ".snapshot", "hello", "lnk"
+        EXPECT_EQ(names.size(), 4u);           // ".", "..", "hello", "lnk"
         EXPECT_NE(std::find(names.begin(), names.end(), "."), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), ".."), names.end());
-        EXPECT_NE(std::find(names.begin(), names.end(), ".snapshot"), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), "hello"), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), "lnk"), names.end());
+        //  .snapshot is hidden from readdir (NetApp convention) …
+        EXPECT_EQ(std::find(names.begin(), names.end(), ".snapshot"), names.end());
+    }
+
+    //  … but still resolvable by name (LOOKUP succeeds).
+    {
+        std::vector<uint8_t> a = fhArg(fhId, fhSnap);
+        std::vector<uint8_t> n = strArg(".snapshot");
+        a.insert(a.end(), n.begin(), n.end());
+        EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 3, a).body[0]), 0u); // NFS3_OK
     }
 
     //  READDIR resuming after cookie 2 (past "." and "..") → the rest.
@@ -300,7 +309,7 @@ TEST(NfsV3, MountWalkStat) {
             o += 8;
             ++n;
         }
-        EXPECT_EQ(n, 3); // ".snapshot", "hello", "lnk" remain
+        EXPECT_EQ(n, 2); // "hello" and "lnk" remain
     }
 
     //  READDIRPLUS: like READDIR but each entry carries name_attributes
@@ -344,7 +353,7 @@ TEST(NfsV3, MountWalkStat) {
             ++n;
         }
         EXPECT_EQ(get32(&dp.body[o + 4]), 1u); // eof
-        EXPECT_EQ(n, 5);                       // + ".snapshot"
+        EXPECT_EQ(n, 4);                       // ".", "..", "hello", "lnk"
         EXPECT_TRUE(sawHello);
     }
 
