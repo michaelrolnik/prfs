@@ -186,6 +186,20 @@ public:
         w->commit();
     }
 
+    //  FS content policy — an opaque blob in meta, persisted, never parsed.
+    std::string contentConfig() const override {
+        auto r = m_kv->begin(false);
+        std::string v;
+        r->get(Kv::Meta, "content_config", v);
+        return v;
+    }
+
+    void setContentConfig(std::string const& blob) override {
+        auto w = m_kv->begin(true);
+        w->put(Kv::Meta, "content_config", blob);
+        w->commit();
+    }
+
     //  Logical clock (design §3): deterministic and script-driven, never
     //  wall-clock. now() reads it; setTime() is the only thing that advances it.
     uint64_t now() const override { return m_clock; }

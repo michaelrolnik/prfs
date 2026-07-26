@@ -192,6 +192,7 @@ fmt_files = files(
     'tests/support.hpp',
     'tests/core/clock.cpp',
     'tests/core/contract.cpp',
+    'tests/core/contentconfig.cpp',
     'tests/core/dag.cpp',
     'tests/core/differential.cpp',
     'tests/core/invariant.cpp',

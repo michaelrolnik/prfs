@@ -11,6 +11,7 @@ test_inc = include_directories('.')
 tests = [
     ['clock', 'core/clock.cpp', 60],
     ['contract', 'core/contract.cpp', 60],
+    ['contentconfig', 'core/contentconfig.cpp', 60],
     ['dag', 'core/dag.cpp', 60],
     ['differential', 'core/differential.cpp', 120],
     ['invariant', 'core/invariant.cpp', 120],

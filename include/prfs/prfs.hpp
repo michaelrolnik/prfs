@@ -141,6 +141,12 @@ public:
     virtual uint64_t now() const = 0;     // read the logical time (does not advance)
     virtual void setTime(uint64_t t) = 0; // set the logical time (the only advance)
 
+    //  Filesystem content policy (design §11.2): an opaque serialized
+    //  ContentConfig the store persists but never interprets. The content
+    //  provider (docs/content.md) owns the format; empty until set.
+    virtual std::string contentConfig() const = 0;
+    virtual void setContentConfig(std::string const& blob) = 0;
+
     //  versioning
     virtual SnapId snapshot(std::string const& label = "") = 0;
     virtual std::vector<NodeDiff> diffNodes(SnapId a, SnapId b) = 0;

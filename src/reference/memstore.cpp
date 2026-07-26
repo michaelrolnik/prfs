@@ -115,6 +115,11 @@ public:
         m_changes[m_cur].insert(m_root);
     }
 
+    //  FS content policy — an opaque blob, never parsed here.
+    std::string contentConfig() const override { return m_contentConfig; }
+
+    void setContentConfig(std::string const& blob) override { m_contentConfig = blob; }
+
     //  Logical clock (design §3): deterministic and script-driven, never
     //  wall-clock. now() reads it; setTime() is the only thing that advances it.
     uint64_t now() const override { return m_clock; }
@@ -595,6 +600,7 @@ private:
     std::map<uint64_t, std::set<std::string>> m_names;
     std::map<SnapId, std::set<uint64_t>> m_changes;
     std::map<SnapId, SnapInfo> m_snaps;
+    std::string m_contentConfig;
     uint64_t m_next = 1;
     SnapId m_cur = 1;
     uint64_t m_root = 0;
