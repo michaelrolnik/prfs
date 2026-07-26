@@ -33,7 +33,7 @@ Status: ✅ done · ⬜ open.
 | S8  | ✅     | Vendor LMDB submodule + `LmdbKv` / `MemKv` engines                          |
 | S9  | ✅     | Differential harness (caught B9)                                            |
 | S10 | ✅     | Extend tests: invariant/property, determinism, crash-safety                 |
-| S11 | ⬜     | `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12)                  |
+| S11 | ✅     | `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12)                  |
 | S12 | ⬜     | Statistics (§9), incl. `FSSTAT`/`FSINFO` mapping                            |
 | L1  | ⬜     | Content provider (own doc): block/pattern model, dedup                      |
 | L2  | ⬜     | NFS front-end: v3 first; v4 subset or NFS-Ganesha FSAL                      |
@@ -74,7 +74,7 @@ Status: ✅ done · ⬜ open.
 - **S8** ✅ — Vendor LMDB as a git submodule (`third_party/lmdb`) + **`LmdbKv`** and **`MemKv`** engines — contract tests green against both via `INSTANTIATE_TEST_SUITE_P` (oracle + backend).
 - **S9** ✅ — **Differential harness** (`tests/test_diff.cpp`): pseudo-random op sequences driven into oracle + backend in lockstep; canonical reachable-graph serialization, error codes, snapshot ids and global stats cross-checked every step; every snapshot view re-verified at the end. 8 seeds × 1500 ops. Caught the `stats().links` orphan-dir undercount (bugs.md B9).
 - **S10** ✅ — Extend tests: **invariant/property** (`tests/core/invariant.cpp`: nlink=#parents, unique names, lookup≡readdir, Σ down-links≡`stats().links`, live-node counts, snapshot immutability, failed-op-is-no-op), **determinism** (`tests/core/determinism.cpp`: same op stream → identical view/stats/ids across fresh instances), **crash-safety** (`tests/storage/lmdb/crash.cpp`: committed state + range-back views survive drop/reopen; post-reopen writes persist; auto-skips non-persistent engines). Test tree mirrors `src/` (`tests/core/*` = `PrfsStore`, `tests/storage/lmdb/*` = engine-specific); shared `tests/support.hpp` (canon, temp dir, `Lockstep` driver).
-- **S11** ⬜ — `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12).
+- **S11** ✅ — **`prfs-lua`** bindings (sol2) + **`prfs-test`** scenario runner (§12). `libprfs` stays lua-free; `registerLua()` (`src/lua/bindings.cpp`, `include/prfs/lua.hpp`) installs a `prfs` global (factories `open`/`mem`, `Type`/`Error`/`NodeChange`/`PathChange` enums) plus `IPrfs`/`INode` usertypes. `prfs-test` (`src/lua/harness.cpp`) embeds Lua and runs a `.lua` scenario; `tests/lua/smoke.lua` exercises the surface and is a meson test (`lua-scenario`). Lua 5.4.7 + sol2 v3.5.0 vendored as git submodules; whole layer gated by `-Dlua` (default on).
 - **S12** ⬜ — Statistics (§9), incl. the `FSSTAT`/`FSINFO` mapping.
 
 ## Later / separate modules

@@ -64,6 +64,53 @@ prfs_dep = declare_dependency(
     include_directories : prfs_inc,
 )
 
+#   Scripting — prfs-lua (sol2 bindings) + prfs-test (scenario runner), design
+#   §12. libprfs stays lua-free; this sits on top. Lua and sol2 are git
+#   submodules; the whole layer is optional (-Dlua=false).
+prfs_lua_dep = disabler()
+if get_option('lua')
+    cc = meson.get_compiler('c')
+    lua_dir = 'third_party/lua'  # git submodule (pinned v5.4.7)
+    #   Single-TU Lua library build: onelua.c with MAKE_LIB pulls in core + libs.
+    lua_lib = static_library(
+        'lua',
+        lua_dir / 'onelua.c',
+        c_args              : '-DMAKE_LIB',
+        include_directories : include_directories(lua_dir),
+        override_options    : ['warning_level=0', 'c_std=c11'],
+    )
+    lua_dep = declare_dependency(
+        link_with           : lua_lib,
+        # lua-cxx supplies the lua.hpp wrapper sol2 expects; it precedes the sources.
+        include_directories : include_directories('third_party/lua-cxx', lua_dir),
+        dependencies        : [cc.find_library('m', required : false)],
+    )
+    sol2_dep = declare_dependency(  # header-only; git submodule
+        include_directories : include_directories('third_party/sol2/include'),
+        compile_args        : ['-DSOL_ALL_SAFETIES_ON=1'],
+        dependencies        : [lua_dep],
+    )
+    libprfs_lua = static_library(
+        'prfs-lua',
+        'src/lua/bindings.cpp',
+        include_directories : prfs_inc,
+        override_options    : ['warning_level=0'],  # sol2 is warning-heavy
+        dependencies        : [prfs_dep, prfs_ref_dep, sol2_dep],
+    )
+    prfs_lua_dep = declare_dependency(
+        link_with           : libprfs_lua,
+        include_directories : prfs_inc,
+        dependencies        : [prfs_dep, prfs_ref_dep, sol2_dep],
+    )
+    prfs_test = executable(
+        'prfs-test',
+        'src/lua/harness.cpp',
+        override_options    : ['warning_level=0'],
+        dependencies        : [prfs_lua_dep],
+    )
+    test('lua-scenario', prfs_test, args : files('tests/lua/smoke.lua'), timeout : 60)
+endif
+
 #   Formatting — clang-format (.clang-format) is the style authority.
 #   `meson compile format` rewrites in place; the `clang-format` test gates it.
 clang_format = find_program('clang-format', required : false)
@@ -75,6 +122,9 @@ fmt_files = files(
     'src/core/prfs.cpp',
     'src/storage/memory/kv.cpp',
     'src/storage/lmdb/kv.cpp',
+    'include/prfs/lua.hpp',
+    'src/lua/bindings.cpp',
+    'src/lua/harness.cpp',
     'tests/support.hpp',
     'tests/core/contract.cpp',
     'tests/core/differential.cpp',

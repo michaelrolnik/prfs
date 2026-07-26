@@ -8,3 +8,10 @@ option(
     value       : 'lmdb',
     description : 'metadata storage backend (openPrfs). More engines add a choice here.',
 )
+
+option(
+    'lua',
+    type        : 'boolean',
+    value       : true,
+    description : 'build the sol2 Lua bindings (prfs-lua) and the prfs-test scenario runner.',
+)
