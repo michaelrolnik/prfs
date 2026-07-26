@@ -214,6 +214,7 @@ Concrete `IService` providers shipped in `plugins/`, each built as `<name>.so`:
 | `nfsv3` | `nfsv3` | Binds the NFSv3 + MOUNT server (Asio coroutines, own io-thread pool). The real front-end. |
 | `luactl` | `luactl` | Opens a live Lua console on a unix socket (`--control`), `fs` bound to the running store. |
 | `bigtree` | `bigtree` | **Builds** a large synthetic tree into the store, then idles (serves no network). |
+| `perf` | `perf` | **Benchmarks** the content generator (read throughput), single/multi-thread, then idles. |
 | `null` | `null` | Reference/test: one scripted `IPrfs` op. Skipped by the default plugin scan. |
 
 **`bigtree` — the native store-builder.** The C++ twin of `examples/bigtree.lua`:
@@ -242,6 +243,22 @@ so any plugin option is settable from the CLI without the host knowing about it
 (`--set bigtree.total=1T`, `--set note=hi`). A plugin reads it with
 `host.option("bigtree.total")` and advertises it via `IService::options()` for
 discoverability.
+
+**`perf` — read-performance benchmark.** A prfs READ is CPU work (generate the
+bytes = `f(ContentConfig, seed, offset)`), not disk I/O, and it parallelizes: the
+store lock is taken only *shared* for reads. `perf` times the generator directly
+— no sockets, no RPC/XDR, and no client page cache — using the store's own
+`ContentConfig` (sampled from a real file's seed/size when present), and reports
+single- and multi-thread MiB/s plus the scaling factor. It is the **ceiling** the
+NFS path approaches; a mount adds RPC/XDR + kernel-NFS overhead and must be
+measured cache-bypassed. Options via `--set perf.*`: `bytes` (per thread),
+`threads` (0 = hardware concurrency), `blocksize`, `seed`, `size`.
+
+```
+prfs-host --store /tmp/prfs-big --plugin perf.so --set perf.threads=16
+# perf:  1 thread     83.6 MiB/s
+# perf: 16 threads   957.5 MiB/s  (11.5x, 59.8 MiB/s/core)
+```
 
 ### Gotcha: client page cache vs. generated content
 

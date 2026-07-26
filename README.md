@@ -1,8 +1,9 @@
 # prfs
 
-A **synthetic NFS target** for exercising archive/backup tools — the filesystem
-namespace and metadata are real and versioned, but file **content is generated
-on the fly**, never stored.
+**prfs** — *Pseudo-Random File System* — is a **synthetic NFS target** for
+exercising archive/backup tools. The filesystem namespace and metadata are real
+and versioned, but file **content is generated on the fly** (pseudo-randomly,
+from a per-file seed), never stored.
 
 ## Why it exists
 
@@ -66,8 +67,9 @@ This is the whole point: writes and rewrites cost a seed update, not a terabyte.
   services are all self-registering providers keyed by interface + name.
 - **Plugin host** — `prfs-host` `dlopen`s service plugins (`docs/plugins.md`):
   **nfsv3** (a full read-write NFSv3 + MOUNT server on Asio), **luactl** (a live
-  Lua console over a unix socket), and **bigtree** (a native store-builder that
-  populates a large synthetic tree on start).
+  Lua console over a unix socket), **bigtree** (a native store-builder that
+  populates a large synthetic tree on start), and **perf** (benchmarks the
+  content generator, single- and multi-threaded).
 
 ## Build
 
@@ -129,6 +131,25 @@ Everything read back is generated; everything written costs only a seed update.
 > the host with `--time-advance` for monotonic mtimes so cache-revalidating
 > readers notice changes.
 
+## Measuring read performance
+
+A prfs READ is CPU work (generate the bytes), not I/O, and it parallelizes across
+cores (the store lock is taken only *shared* for reads). The **perf** plugin times
+the generator directly — no sockets, no RPC, no client cache — using the store's
+own content policy, so it's the ceiling the NFS path approaches:
+
+```bash
+./build/prfs-host --store /tmp/prfs --plugin ./build/perf.so \
+  --set perf.threads=16 --set perf.bytes=1G --set perf.blocksize=1M
+# perf:  1 thread     83.6 MiB/s
+# perf: 16 threads   957.5 MiB/s  (11.5x, 59.8 MiB/s/core)
+```
+
+To measure *end to end* over a mount instead, you **must** bypass the client page
+cache or you'll just be timing RAM — read with `dd if=<file> of=/dev/null bs=1M
+iflag=direct` (run several in parallel to saturate cores), or use `fio
+--direct=1`.
+
 ## Layout
 
 | Path | What |
@@ -144,6 +165,7 @@ Everything read back is generated; everything written costs only a seed update.
 | `plugins/nfsv3/` | the NFSv3 + MOUNT service |
 | `plugins/luactl/` | live Lua console over a unix socket |
 | `plugins/bigtree/` | native store-builder (large synthetic tree) |
+| `plugins/perf/` | read-performance benchmark (content generator) |
 | `examples/` | `bigtree.lua` — build a reproducible multi-TiB tree |
 | `docs/` | design, content, di, plugins, todo |
 | `tests/` | mirrors `src/`: contract/differential/invariant/determinism/crash + protocol |
