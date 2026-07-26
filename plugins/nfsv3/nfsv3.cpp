@@ -269,6 +269,22 @@ struct Writer {
     }
 };
 
+//  Display fileid for a node in a given view. The live view (LATEST) uses the
+//  raw nodeID; a snapshot view mixes the snapId in, so a node's snapshot copy
+//  never shares a (fileid) — and thus a (st_dev, st_ino) — with its live self.
+//  Clients that ignore our per-object fsid would otherwise see `/.snapshot/N`
+//  as the same inode as `/` and report a directory loop (du "Circular …").
+uint64_t viewFileid(uint64_t id, uint64_t snap) {
+    if (snap == LATEST) {
+        return id;
+    }
+    uint64_t h = id ^ (snap * 0x9E3779B97F4A7C15ull);
+    h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ull;
+    h = (h ^ (h >> 27)) * 0x94d049bb133111ebull;
+    h ^= h >> 31;
+    return h | 1; // never 0
+}
+
 //  prfs Type → NFSv3 ftype3, indexed by Type (REG,DIR,LNK,BLK,CHR,FIFO,SOCK).
 uint32_t ftype3(Type t) {
     static constexpr uint32_t kFtype3[] = {1, 2, 5, 3, 4, 7, 6};
@@ -288,15 +304,15 @@ void encodeFattr(Writer& w, INode& n) {
     w.u32(n.uid());
     w.u32(n.gid());
     w.u64(n.size());
-    w.u64(n.size()); // used ≈ size (content is synthetic)
-    w.u32(maj);      // specdata3.specdata1
-    w.u32(min);      // specdata3.specdata2
-    //  fsid distinguishes each snapshot from the live tree: a node's (fsid,
-    //  fileid) must be unique, but fileid (the nodeID) repeats across snapshot
-    //  views — so a snapshot view gets its snapId as fsid (live = 0). Without
-    //  this the client sees `/.snapshot/N` as the same object as `/` (ELOOP).
-    w.u64(n.snap() == LATEST ? 0 : n.snap()); // fsid
-    w.u64(n.id());                            // fileid
+    w.u64(n.size());          // used ≈ size (content is synthetic)
+    w.u32(maj);               // specdata3.specdata1
+    w.u32(min);               // specdata3.specdata2
+    uint64_t snap = n.snap(); // the view this handle reads at
+    //  A snapshot view is its own filesystem (fsid = snapId, live = 0) AND gets
+    //  a mixed fileid, so its (fsid, fileid) can't collide with the live node no
+    //  matter how the client treats fsid — see viewFileid.
+    w.u64(snap == LATEST ? 0 : snap); // fsid
+    w.u64(viewFileid(n.id(), snap));  // fileid
     w.time(n.atime());
     w.time(n.mtime());
     w.time(n.ctime());
@@ -391,9 +407,9 @@ uint64_t mixSeed(uint64_t seed, uint64_t off, std::string const& data) {
 
 size_t pad4(size_t n) { return (n + 3) & ~size_t(3); }
 
-//  One READDIR entry with the cookie the client returns to resume after it.
+//  One READDIR entry with the cookie the client returns to resume after it. The
+//  node carries the view snap; fileid/fh are derived from it at encode time.
 struct DirEnt {
-    uint64_t fileid;
     std::string name;
     uint64_t cookie;
     Node node;
@@ -407,19 +423,19 @@ struct DirEnt {
 //  with cookie <= the client's.
 std::vector<DirEnt> listDir(IPrfs& fs, Node dir) {
     std::vector<DirEnt> out;
-    out.push_back({dir->id(), ".", 0, dir});
+    out.push_back({".", 0, dir});
     std::vector<Node> ps = fs.parents(dir);
     Node parent = ps.empty() ? dir : ps.front();
-    out.push_back({parent->id(), "..", 0, parent});
+    out.push_back({"..", 0, parent});
     //  Surface .snapshot: resolvable by name in every live directory, but the
     //  store omits it from readdir, so add it here (never inside a frozen view).
     if (dir->snap() == LATEST) {
         if (Node snap = fs.lookup(dir, SNAPSHOT_NAME)) {
-            out.push_back({snap->id(), std::string(SNAPSHOT_NAME), 0, snap});
+            out.push_back({std::string(SNAPSHOT_NAME), 0, snap});
         }
     }
     for (auto& [name, node] : fs.readdir(dir)) {
-        out.push_back({node->id(), name, 0, node});
+        out.push_back({name, 0, node});
     }
     for (size_t i = 0; i < out.size(); ++i) {
         out[i].cookie = i + 1;
@@ -835,7 +851,7 @@ private:
                 break;
             }
             w.u32(1); // value-follows
-            w.u64(e.fileid);
+            w.u64(viewFileid(e.node->id(), e.node->snap()));
             w.str(e.name);
             w.u64(e.cookie);
             budget += esz;
@@ -887,7 +903,7 @@ private:
                 break;
             }
             w.u32(1); // value-follows
-            w.u64(e.fileid);
+            w.u64(viewFileid(e.node->id(), e.node->snap()));
             w.str(e.name);
             w.u64(e.cookie);
             encodePostOp(w, e.node.get());      // name_attributes

@@ -581,9 +581,10 @@ TEST(NfsV3, SnapshotBrowse) {
         return rpc(fd, PROG_NFS, NFS_V3, 3, a);
     };
 
-    //  Live root reports fsid 0.
+    //  Live root reports fsid 0 and fileid == its nodeID.
     Reply grt = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(rid, rs));
-    EXPECT_EQ(get64(&grt.body[4 + 44]), 0u);
+    EXPECT_EQ(get64(&grt.body[4 + 44]), 0u);  // fsid
+    EXPECT_EQ(get64(&grt.body[4 + 52]), rid); // fileid
 
     //  LOOKUP .snapshot → the synthesized snapshot directory.
     Reply lss = lookup(rid, rs, SNAPSHOT_NAME);
@@ -605,6 +606,10 @@ TEST(NfsV3, SnapshotBrowse) {
     Reply gv = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(vId, vSnap));
     EXPECT_EQ(get32(&gv.body[4]), 2u);        // NF3DIR
     EXPECT_EQ(get64(&gv.body[4 + 44]), snap); // snapshot fsid
+    //  Same underlying nodeID, but a DISTINCT display fileid — so a client that
+    //  collapses fsid to one st_dev still can't confuse /.snapshot/N with / (the
+    //  `du` "Circular directory structure" bug).
+    EXPECT_NE(get64(&gv.body[4 + 52]), rid);
 
     //  The snapshot view is the pre-snapshot tree: before.txt present, after.txt
     //  absent; the live tree has both.
