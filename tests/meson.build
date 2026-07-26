@@ -3,18 +3,25 @@
 
 gtest_dep = dependency('gtest', main : true, required : true)
 
-test_store = executable(
-    'test_store',
-    'test_store.cpp',
-    dependencies : [prfs_ref_dep, prfs_dep, gtest_dep],
-)
+#   The tests dir is on the include path so subdir suites can #include "support.hpp".
+test_inc = include_directories('.')
 
-test('store', test_store)
+#   Mirrors src/: core/* exercises PrfsStore (all engines); storage/lmdb/* is
+#   engine-specific. name → source, followed by an optional per-test timeout.
+tests = [
+    ['contract', 'core/contract.cpp', 60],
+    ['differential', 'core/differential.cpp', 120],
+    ['invariant', 'core/invariant.cpp', 120],
+    ['determinism', 'core/determinism.cpp', 120],
+    ['crash', 'storage/lmdb/crash.cpp', 120],
+]
 
-test_diff = executable(
-    'test_diff',
-    'test_diff.cpp',
-    dependencies : [prfs_ref_dep, prfs_dep, gtest_dep],
-)
-
-test('diff', test_diff, timeout : 120)
+foreach t : tests
+    exe = executable(
+        'test_' + t[0],
+        t[1],
+        include_directories : test_inc,
+        dependencies        : [prfs_ref_dep, prfs_dep, gtest_dep],
+    )
+    test(t[0], exe, timeout : t[2])
+endforeach

@@ -32,7 +32,7 @@ Status: ✅ done · ⬜ open.
 | S7  | ✅     | Storage-backend interface (`IKvStore`/`IKvTxn`/`IKvCursor`)                 |
 | S8  | ✅     | Vendor LMDB submodule + `LmdbKv` / `MemKv` engines                          |
 | S9  | ✅     | Differential harness (caught B9)                                            |
-| S10 | ⬜     | Extend tests: invariant/property, determinism, crash-safety                 |
+| S10 | ✅     | Extend tests: invariant/property, determinism, crash-safety                 |
 | S11 | ⬜     | `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12)                  |
 | S12 | ⬜     | Statistics (§9), incl. `FSSTAT`/`FSINFO` mapping                            |
 | L1  | ⬜     | Content provider (own doc): block/pattern model, dedup                      |
@@ -73,7 +73,7 @@ Status: ✅ done · ⬜ open.
 - **S7** ✅ — **Storage-backend interface** (`IKvStore`/`IKvTxn`/`IKvCursor`): one `PrfsStore` (all FS logic, design §5/§6) over swappable engines.
 - **S8** ✅ — Vendor LMDB as a git submodule (`third_party/lmdb`) + **`LmdbKv`** and **`MemKv`** engines — contract tests green against both via `INSTANTIATE_TEST_SUITE_P` (oracle + backend).
 - **S9** ✅ — **Differential harness** (`tests/test_diff.cpp`): pseudo-random op sequences driven into oracle + backend in lockstep; canonical reachable-graph serialization, error codes, snapshot ids and global stats cross-checked every step; every snapshot view re-verified at the end. 8 seeds × 1500 ops. Caught the `stats().links` orphan-dir undercount (bugs.md B9).
-- **S10** ⬜ — Extend tests: invariant/property, determinism, crash-safety.
+- **S10** ✅ — Extend tests: **invariant/property** (`tests/core/invariant.cpp`: nlink=#parents, unique names, lookup≡readdir, Σ down-links≡`stats().links`, live-node counts, snapshot immutability, failed-op-is-no-op), **determinism** (`tests/core/determinism.cpp`: same op stream → identical view/stats/ids across fresh instances), **crash-safety** (`tests/storage/lmdb/crash.cpp`: committed state + range-back views survive drop/reopen; post-reopen writes persist; auto-skips non-persistent engines). Test tree mirrors `src/` (`tests/core/*` = `PrfsStore`, `tests/storage/lmdb/*` = engine-specific); shared `tests/support.hpp` (canon, temp dir, `Lockstep` driver).
 - **S11** ⬜ — `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12).
 - **S12** ⬜ — Statistics (§9), incl. the `FSSTAT`/`FSINFO` mapping.
 

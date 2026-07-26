@@ -75,8 +75,12 @@ fmt_files = files(
     'src/core/prfs.cpp',
     'src/storage/memory/kv.cpp',
     'src/storage/lmdb/kv.cpp',
-    'tests/test_store.cpp',
-    'tests/test_diff.cpp',
+    'tests/support.hpp',
+    'tests/core/contract.cpp',
+    'tests/core/differential.cpp',
+    'tests/core/invariant.cpp',
+    'tests/core/determinism.cpp',
+    'tests/storage/lmdb/crash.cpp',
 )
 if clang_format.found()
     run_target('format', command : [clang_format, '-i'] + fmt_files)

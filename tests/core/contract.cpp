@@ -9,30 +9,22 @@
 //
 #include "prfs/memstore.hpp"
 #include "prfs/prfs.hpp"
+#include "support.hpp"
 
 #include <gtest/gtest.h>
 
-#include <atomic>
-#include <filesystem>
-#include <functional>
-#include <string>
-#include <unistd.h>
-
 using namespace prfs;
+using prfs::test::Factory;
+using prfs::test::uniqueTempDir;
 
 namespace {
-
-using Factory = std::function<std::unique_ptr<IPrfs>()>;
 
 std::unique_ptr<IPrfs> oracle() { return makeMemStore(); }
 
 std::unique_ptr<IPrfs> backend() {
-    static std::atomic<unsigned> n{0};
-    auto dir = std::filesystem::temp_directory_path() /
-               ("prfs-test-" + std::to_string(::getpid()) + "-" + std::to_string(n++));
     Options o;
     o.clean = true;
-    return openPrfs(dir.string(), o);
+    return openPrfs(uniqueTempDir("contract").string(), o);
 }
 
 } // namespace
