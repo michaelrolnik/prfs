@@ -104,9 +104,6 @@ constexpr uint32_t NFS3_OK = 0, NFS3ERR_PERM = 1, NFS3ERR_NOENT = 2, NFS3ERR_EXI
                    NFS3ERR_ROFS = 30, NFS3ERR_NOTEMPTY = 66, NFS3ERR_STALE = 70,
                    NFS3ERR_BADTYPE = 10007;
 
-//  access3 bits — what this synthetic (read-mostly) target grants.
-constexpr uint32_t ACCESS3_READ = 0x0001, ACCESS3_LOOKUP = 0x0002, ACCESS3_EXECUTE = 0x0020;
-
 //  RPC auth flavors we care about (RFC 5531). AUTH_SYS carries uid/gid.
 constexpr uint32_t AUTH_SYS = 1;
 
@@ -680,8 +677,9 @@ private:
         }
         w.u32(NFS3_OK);
         encodePostOp(w, n.get());
-        //  Read-mostly target: grant read/lookup/execute, never modify.
-        w.u32(want & (ACCESS3_READ | ACCESS3_LOOKUP | ACCESS3_EXECUTE));
+        //  Permissive synthetic target (no Unix-mode enforcement): grant every
+        //  access bit the client asked about, so read *and* write proceed.
+        w.u32(want);
         return SUCCESS;
     }
 

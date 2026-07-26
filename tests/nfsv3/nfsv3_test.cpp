@@ -240,13 +240,14 @@ TEST(NfsV3, MountWalkStat) {
     missArgs.insert(missArgs.end(), miss.begin(), miss.end());
     EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 3, missArgs).body[0]), 2u);
 
-    //  ACCESS the root asking for READ|LOOKUP (0x03) → both granted.
+    //  ACCESS asking for the full mask (incl. MODIFY/EXTEND/DELETE, 0x3f) → all
+    //  granted (permissive target, so write opens succeed).
     std::vector<uint8_t> acArgs = fhArg(fhId, fhSnap);
-    put32(acArgs, 0x03);
+    put32(acArgs, 0x3f);
     Reply ac = rpc(fd, PROG_NFS, NFS_V3, 4, acArgs);
     ASSERT_EQ(ac.astat, 0u);
     EXPECT_EQ(get32(&ac.body[0]), 0u);     // NFS3_OK
-    EXPECT_EQ(get32(&ac.body[92]), 0x03u); // granted after status + post_op_attr
+    EXPECT_EQ(get32(&ac.body[92]), 0x3fu); // granted after status + post_op_attr
 
     //  GETATTR a bogus fh → NFS3ERR_STALE (70).
     EXPECT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(999999, LAT)).body[0]), 70u);
