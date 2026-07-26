@@ -9,7 +9,8 @@
 //  filehandle for the single export "/"; NFS NULL, GETATTR, LOOKUP, ACCESS let a
 //  client walk the tree and stat nodes; READ returns file bytes (sourced by the
 //  host — procedural content or literal); READLINK returns a symlink target;
-//  READDIR/READDIRPLUS list directories (with synthesized "." and ".."); and
+//  READDIR/READDIRPLUS list directories (with synthesized "." / ".." / the
+//  ".snapshot" virtual dir); and
 //  FSSTAT/FSINFO/PATHCONF report volume usage, server parameters, and limits
 //  (the libprfs_nfs §9 projection). The write surface — SETATTR, WRITE, CREATE,
 //  MKDIR, SYMLINK, MKNOD, REMOVE, RMDIR, RENAME, LINK, COMMIT — mutates the live
@@ -399,15 +400,24 @@ struct DirEnt {
 };
 
 //  Build a directory's entry list with monotonic cookies. "." and ".." lead
-//  (".." resolves via the first parent, or self at the root), then the store's
-//  entries in its stable order. cookie = 1-based position, so cookie 0 means
-//  "from the start" and a resume drops every entry with cookie <= the client's.
+//  (".." resolves via the first parent, or self at the root), then the
+//  synthesized ".snapshot" (live dirs only — the store hides it from its own
+//  readdir), then the store's entries in its stable order. cookie = 1-based
+//  position, so cookie 0 means "from the start" and a resume drops every entry
+//  with cookie <= the client's.
 std::vector<DirEnt> listDir(IPrfs& fs, Node dir) {
     std::vector<DirEnt> out;
     out.push_back({dir->id(), ".", 0, dir});
     std::vector<Node> ps = fs.parents(dir);
     Node parent = ps.empty() ? dir : ps.front();
     out.push_back({parent->id(), "..", 0, parent});
+    //  Surface .snapshot: resolvable by name in every live directory, but the
+    //  store omits it from readdir, so add it here (never inside a frozen view).
+    if (dir->snap() == LATEST) {
+        if (Node snap = fs.lookup(dir, SNAPSHOT_NAME)) {
+            out.push_back({snap->id(), std::string(SNAPSHOT_NAME), 0, snap});
+        }
+    }
     for (auto& [name, node] : fs.readdir(dir)) {
         out.push_back({node->id(), name, 0, node});
     }

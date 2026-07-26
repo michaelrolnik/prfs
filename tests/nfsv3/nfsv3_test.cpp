@@ -276,14 +276,15 @@ TEST(NfsV3, MountWalkStat) {
             o += 8; // cookie
         }
         EXPECT_EQ(get32(&dd.body[o + 4]), 1u); // eof
-        EXPECT_EQ(names.size(), 4u);
+        EXPECT_EQ(names.size(), 5u);           // ".", "..", ".snapshot", "hello", "lnk"
         EXPECT_NE(std::find(names.begin(), names.end(), "."), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), ".."), names.end());
+        EXPECT_NE(std::find(names.begin(), names.end(), ".snapshot"), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), "hello"), names.end());
         EXPECT_NE(std::find(names.begin(), names.end(), "lnk"), names.end());
     }
 
-    //  READDIR resuming after cookie 2 (past "." and "..") → the real entries.
+    //  READDIR resuming after cookie 2 (past "." and "..") → the rest.
     std::vector<uint8_t> ddArgs2 = fhArg(fhId, fhSnap);
     putU64(ddArgs2, 2);
     putU64(ddArgs2, 0);
@@ -299,7 +300,7 @@ TEST(NfsV3, MountWalkStat) {
             o += 8;
             ++n;
         }
-        EXPECT_EQ(n, 2); // "hello" and "lnk" remain
+        EXPECT_EQ(n, 3); // ".snapshot", "hello", "lnk" remain
     }
 
     //  READDIRPLUS: like READDIR but each entry carries name_attributes
@@ -343,7 +344,7 @@ TEST(NfsV3, MountWalkStat) {
             ++n;
         }
         EXPECT_EQ(get32(&dp.body[o + 4]), 1u); // eof
-        EXPECT_EQ(n, 4);
+        EXPECT_EQ(n, 5);                       // + ".snapshot"
         EXPECT_TRUE(sawHello);
     }
 
