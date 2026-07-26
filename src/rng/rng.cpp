@@ -18,9 +18,8 @@
 #endif
 
 namespace prfs::rng {
-namespace {
-std::string s_active;
-}
+
+static std::string s_active;
 
 std::string active() { return s_active.empty() ? PRFS_DEFAULT_RNG : s_active; }
 

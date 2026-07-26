@@ -27,8 +27,8 @@ struct Threefry : IRng {
     }
 };
 
-Threefry g_threefry;
-di::Register<IRng> const reg{&g_threefry, "threefry"};
+static Threefry g_threefry;
+static di::Register<IRng> const reg{&g_threefry, "threefry"};
 
 } // namespace
 } // namespace prfs::rng

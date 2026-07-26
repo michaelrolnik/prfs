@@ -25,8 +25,8 @@ struct Philox : IRng {
     }
 };
 
-Philox g_philox;
-di::Register<IRng> const reg{&g_philox, "philox"};
+static Philox g_philox;
+static di::Register<IRng> const reg{&g_philox, "philox"};
 
 } // namespace
 } // namespace prfs::rng
