@@ -6,8 +6,8 @@
 //  Exercises the real PrfsStore logic without persistence (and is distinct from
 //  the reference oracle, so differential testing is meaningful). -Dstorage=memory.
 //
+#include "prfs/di.hpp"
 #include "prfs/kvstore.hpp"
-#include "prfs/prfs.hpp"
 
 #include <array>
 #include <map>
@@ -122,12 +122,15 @@ private:
     Data m_data;
 };
 
+struct MemEngine : IStorageEngine {
+    std::unique_ptr<IKvStore> open(std::string const&, bool) const override { return makeMemKv(); }
+};
+
 } // namespace
 
 std::unique_ptr<IKvStore> makeMemKv() { return std::make_unique<MemKv>(); }
 
-std::unique_ptr<IPrfs> openPrfs(std::string const& /*path*/, Options const& /*opts*/) {
-    return makePrfsStore(makeMemKv());
-}
+static MemEngine g_memEngine;
+static di::Register<IStorageEngine> const reg{&g_memEngine, "memory"};
 
 } // namespace prfs

@@ -19,6 +19,7 @@ tests = [
     ['snapdir', 'core/snapdir.cpp', 60],
     ['readdirpage', 'core/readdirpage.cpp', 60],
     ['crash', 'storage/lmdb/crash.cpp', 120],
+    ['engine', 'storage/engine_test.cpp', 60],
     ['fsstat', 'nfs/fsstat.cpp', 60],
 ]
 

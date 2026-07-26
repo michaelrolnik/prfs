@@ -23,45 +23,49 @@ prfs_ref_dep = declare_dependency(
     include_directories : prfs_inc,
 )
 
-#   Production store — PrfsStore (all FS logic) over an IKvStore engine chosen
-#   at build time (-Dstorage=…).
+#   Production store — PrfsStore (all FS logic) over an IKvStore engine. Both
+#   engines are compiled and self-register as di IStorageEngine providers;
+#   -Dstorage picks the runtime default (openPrfs resolves it by name).
 storage = get_option('storage')
-message('prfs storage backend: @0@'.format(storage))
+message('prfs default storage engine: @0@'.format(storage))
 
-prfs_core = files('src/core/prfs.cpp')
+#   liblmdb (git submodule) — always built (the lmdb engine needs it).
+lmdb_dir = 'third_party/lmdb/libraries/liblmdb'
+lmdb_inc = include_directories(lmdb_dir)
+lmdb_lib = static_library(
+    'lmdb',
+    lmdb_dir / 'mdb.c', lmdb_dir / 'midl.c',
+    include_directories : lmdb_inc,
+    override_options    : ['warning_level=0', 'c_std=c11'],
+    dependencies        : [dependency('threads')],
+)
+lmdb_dep = declare_dependency(
+    link_with           : lmdb_lib,
+    include_directories : lmdb_inc,
+    dependencies        : [dependency('threads')],
+)
 
-if storage == 'memory'
-    libprfs = static_library(
-        'prfs',
-        prfs_core + files('src/storage/memory/kv.cpp'),
-        include_directories : prfs_inc,
-    )
-elif storage == 'lmdb'
-    lmdb_dir = 'third_party/lmdb/libraries/liblmdb'  # git submodule
-    lmdb_inc = include_directories(lmdb_dir)
-    lmdb_lib = static_library(
-        'lmdb',
-        lmdb_dir / 'mdb.c', lmdb_dir / 'midl.c',
-        include_directories : lmdb_inc,
-        override_options    : ['warning_level=0', 'c_std=c11'],
-        dependencies        : [dependency('threads')],
-    )
-    lmdb_dep = declare_dependency(
-        link_with           : lmdb_lib,
-        include_directories : lmdb_inc,
-        dependencies        : [dependency('threads')],
-    )
-    libprfs = static_library(
-        'prfs',
-        prfs_core + files('src/storage/lmdb/kv.cpp'),
-        include_directories : prfs_inc,
-        dependencies        : [lmdb_dep],
-    )
-endif
+#   The engines — each self-registers an IStorageEngine (link_whole keeps them).
+libprfs_engines = static_library(
+    'prfs-engines',
+    files('src/storage/memory/kv.cpp', 'src/storage/lmdb/kv.cpp'),
+    include_directories : prfs_inc,
+    dependencies        : [lmdb_dep],
+)
+
+#   Core store logic + engine-agnostic openPrfs (resolves the default engine).
+libprfs = static_library(
+    'prfs',
+    files('src/core/prfs.cpp', 'src/core/open.cpp'),
+    include_directories : prfs_inc,
+    cpp_args            : ['-DPRFS_DEFAULT_STORAGE="' + storage + '"'],
+)
 
 prfs_dep = declare_dependency(
     link_with           : libprfs,
+    link_whole          : libprfs_engines,
     include_directories : prfs_inc,
+    dependencies        : [lmdb_dep],
 )
 
 #   NFS mapping — the FSSTAT/FSINFO projection over the store's O(1) Stats
@@ -168,6 +172,7 @@ fmt_files = files(
     'include/prfs/memstore.hpp',
     'src/reference/memstore.cpp',
     'src/core/prfs.cpp',
+    'src/core/open.cpp',
     'src/storage/memory/kv.cpp',
     'src/storage/lmdb/kv.cpp',
     'include/prfs/fsstat.hpp',
@@ -195,6 +200,7 @@ fmt_files = files(
     'tests/core/snapdir.cpp',
     'tests/core/readdirpage.cpp',
     'tests/storage/lmdb/crash.cpp',
+    'tests/storage/engine_test.cpp',
     'tests/nfs/fsstat.cpp',
 )
 if clang_format.found()

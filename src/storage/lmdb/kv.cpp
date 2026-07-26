@@ -5,8 +5,8 @@
 //  storage engine: lmdb — a persistent IKvStore over vendored liblmdb
 //  (third_party/lmdb). -Dstorage=lmdb (the default).
 //
+#include "prfs/di.hpp"
 #include "prfs/kvstore.hpp"
-#include "prfs/prfs.hpp"
 
 #include <lmdb.h>
 
@@ -173,14 +173,19 @@ private:
     std::array<MDB_dbi, size_t(Kv::COUNT_)> m_dbi{};
 };
 
+struct LmdbEngine : IStorageEngine {
+    std::unique_ptr<IKvStore> open(std::string const& path, bool clean) const override {
+        return makeLmdbKv(path, clean);
+    }
+};
+
 } // namespace
 
 std::unique_ptr<IKvStore> makeLmdbKv(std::string const& path, bool clean) {
     return std::make_unique<LmdbKv>(path, clean);
 }
 
-std::unique_ptr<IPrfs> openPrfs(std::string const& path, Options const& opts) {
-    return makePrfsStore(makeLmdbKv(path, opts.clean));
-}
+static LmdbEngine g_lmdbEngine;
+static di::Register<IStorageEngine> const reg{&g_lmdbEngine, "lmdb"};
 
 } // namespace prfs

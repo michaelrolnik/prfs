@@ -62,8 +62,17 @@ public:
 //  the one FS implementation, over any engine
 std::unique_ptr<class IPrfs> makePrfsStore(std::unique_ptr<IKvStore> kv);
 
-//  engine factories (defined by the selected backend)
+//  engine factories (defined by each engine)
 std::unique_ptr<IKvStore> makeLmdbKv(std::string const& path, bool clean);
 std::unique_ptr<IKvStore> makeMemKv();
+
+//  A storage engine as a di provider (di name = the engine, "lmdb"/"memory").
+//  Each engine self-registers one; openPrfs resolves the active one (§ storage).
+struct IStorageEngine {
+    static constexpr std::string_view ID = "prfs.engine/1";
+
+    virtual ~IStorageEngine() = default;
+    virtual std::unique_ptr<IKvStore> open(std::string const& path, bool clean) const = 0;
+};
 
 } // namespace prfs

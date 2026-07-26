@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -153,9 +154,13 @@ struct Options {
     bool clean = false; // wipe an existing store on open
 };
 
-//  Production store. The concrete backend is selected at BUILD time
-//  (meson -Dstorage=lmdb|memory|…); this is declared here and defined by the
-//  chosen backend. Adding an engine = a new IPrfs implementation + a build choice.
+//  Production store. openPrfs opens over the *active* storage engine — a di
+//  provider selected by name. The build sets the default (meson -Dstorage=), and
+//  setStorageEngine() may override it once at startup. Adding an engine = a new
+//  IStorageEngine provider (see kvstore.hpp), no change here.
 std::unique_ptr<IPrfs> openPrfs(std::string const& path, Options const& opts = {});
+
+std::string storageEngine();                  // the active engine name
+void setStorageEngine(std::string_view name); // throws std::out_of_range if unregistered
 
 } // namespace prfs
