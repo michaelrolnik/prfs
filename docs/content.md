@@ -129,6 +129,13 @@ GOLDEN = 0x9E3779B97F4A7C15
 h(a,b,tag) = mix64(mix64(a*GOLDEN + b) + tag)         # portable coordinate hash — decisions only
 ```
 
+**Fast enough by construction.** Counter-based generators are embarrassingly parallel (every
+block/word independent), so throughput scales with SIMD and cores rather than a serial stream.
+Single-core ballpark: `mix64` ~5–8 GB/s (and it runs only a few times per block); Philox ~1–3
+GB/s scalar, ~10+ GB/s vectorized; AES-CTR (AES-NI) tens of GB/s. The real floor is memory
+bandwidth — full-entropy blocks must be written out regardless — while holes (`memset`),
+low-entropy, and cache-hot dedup blocks are cheaper still. One core already saturates 10–25 GbE.
+
 For file `S`, block `b`, config `C`:
 
 1. **Sparse?** `isHole = h(S, b, HOLE_TAG) % 100 < C.sparsePercent`. If so the block is zeros and

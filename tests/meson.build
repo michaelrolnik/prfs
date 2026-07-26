@@ -31,3 +31,13 @@ foreach t : tests
     )
     test(t[0], exe, timeout : t[2])
 endforeach
+
+#   Content provider is a standalone leaf — links only prfs-content + gtest.
+if get_option('content')
+    test_content = executable(
+        'test_content',
+        'content/content_test.cpp',
+        dependencies : [prfs_content_dep, gtest_dep],
+    )
+    test('content', test_content, timeout : 60)
+endif

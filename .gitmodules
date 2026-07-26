@@ -7,3 +7,6 @@
 [submodule "third_party/sol2"]
 	path = third_party/sol2
 	url = https://github.com/ThePhD/sol2.git
+[submodule "third_party/random123"]
+	path = third_party/random123
+	url = https://github.com/DEShawResearch/random123.git

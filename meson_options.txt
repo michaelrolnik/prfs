@@ -15,3 +15,18 @@ option(
     value       : true,
     description : 'build the sol2 Lua bindings (prfs-lua) and the prfs-test scenario runner.',
 )
+
+option(
+    'content',
+    type        : 'boolean',
+    value       : true,
+    description : 'build the content provider (libprfs-content), the READ-path byte generator.',
+)
+
+option(
+    'rng',
+    type        : 'combo',
+    choices     : ['philox', 'threefry'],
+    value       : 'philox',
+    description : 'build-time default content RNG (run-wide; overridable once at startup).',
+)

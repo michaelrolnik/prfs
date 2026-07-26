@@ -80,6 +80,6 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 ## Later / separate modules
 
 - **L1** 🚧 — **Content provider** (`libprfs_content`). Design doc done: [`docs/content.md`](content.md) — recipe = extent list of procedural recipes (§11.2), deterministic random-access generator (counter-based mixer), patterns hole/zero/fill/random/dedup, size authority (T7), block size (D3), API + test plan. **Next: implement test-first** (`src/content/`, `tests/content/`, Lua `prfs.content`).
-- **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis. Includes the T1 carve-outs: `..` via-parent resolution (filehandle-encoded ancestor chain) and directory-`nlink` reporting mode (POSIX-compat default / faithful).
+- **L2** ⬜ — **NFS front-end**: v3 first; v4 subset or NFS-Ganesha FSAL per the earlier analysis. Includes the T1 carve-outs: `..` via-parent resolution (filehandle-encoded ancestor chain) and directory-`nlink` reporting mode (POSIX-compat default / faithful). **Threading:** naive `rpcgen` dispatch is single-threaded (static buffers, one `svc_run`) — avoid it. Options: `rpcgen -M` (MT stubs), or generate **XDR only** + our own thread-pool TCP server (self-contained, full MT control), or a **Ganesha FSAL** (Ganesha owns RPC/threading; `IPrfs` is already FSAL-shaped — least protocol code). Decide at L2.
 - **L3** ⬜ — **GC / compaction**: reclaim superseded link-set versions + unreferenced `content`/`strings`.
 - **L4** ⬜ — **Dedup-ratio stats** (phase-2): content refcounting (`logicalSize` vs `physicalSize`).

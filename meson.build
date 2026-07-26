@@ -78,6 +78,39 @@ prfs_nfs_dep = declare_dependency(
     include_directories : prfs_inc,
 )
 
+#   Content provider — the READ-path byte generator (docs/content.md, L1). A leaf
+#   (stdlib + Random123 submodule only, no engine). The RNG is a run-wide choice:
+#   -Drng picks the build-time default; a tool may override it once at startup.
+prfs_content_dep = disabler()
+if get_option('content')
+    #   rng — counter-based generators (Philox/Threefry) behind one API, one file
+    #   per generator. Wraps the Random123 submodule; -Drng picks the default.
+    r123_inc = include_directories('third_party/random123/include', is_system : true)
+    rng_default = 'PRFS_RNG_' + get_option('rng').to_upper()
+    libprfs_rng = static_library(
+        'prfs-rng',
+        files('src/rng/rng.cpp', 'src/rng/philox.cpp', 'src/rng/threefry.cpp'),
+        include_directories : [prfs_inc, r123_inc],
+        cpp_args            : ['-DPRFS_DEFAULT_RNG=' + rng_default],
+    )
+    prfs_rng_dep = declare_dependency(
+        link_with           : libprfs_rng,
+        include_directories : prfs_inc,
+    )
+    libprfs_content = static_library(
+        'prfs-content',
+        'src/content/content.cpp',
+        include_directories : prfs_inc,
+        dependencies        : [prfs_rng_dep],
+    )
+    prfs_content_dep = declare_dependency(
+        link_with           : libprfs_content,
+        include_directories : prfs_inc,
+        dependencies        : [prfs_rng_dep],
+    )
+    message('prfs content RNG default: @0@'.format(get_option('rng')))
+endif
+
 #   Scripting — prfs-lua (sol2 bindings) + prfs-test (scenario runner), design
 #   §12. libprfs stays lua-free; this sits on top. Lua and sol2 are git
 #   submodules; the whole layer is optional (-Dlua=false).
@@ -138,6 +171,13 @@ fmt_files = files(
     'src/storage/lmdb/kv.cpp',
     'include/prfs/fsstat.hpp',
     'src/nfs/fsstat.cpp',
+    'include/prfs/rng.hpp',
+    'src/rng/rng.cpp',
+    'src/rng/philox.cpp',
+    'src/rng/threefry.cpp',
+    'include/prfs/content.hpp',
+    'src/content/content.cpp',
+    'tests/content/content_test.cpp',
     'include/prfs/lua.hpp',
     'src/lua/bindings.cpp',
     'src/lua/harness.cpp',
