@@ -3,16 +3,15 @@
 
 #pragma once
 //
-//  prfs rng — counter-based random generators behind a name-keyed registry
-//  (docs/content.md §4). "Counter-based" = output is a pure function of a 128-bit
-//  counter and a key, so it is random-access (any block/word directly
-//  addressable) — the property the content generator needs.
+//  prfs rng — counter-based random generators as di providers (docs/content.md
+//  §4, docs/di.md §9). Each generator implements IRng and self-registers into the
+//  DI registry under its name (`di::Register<IRng>`, kept by link_whole). "Which
+//  generator" is a di *name*; this header adds only the run-wide active choice on
+//  top. Counter-based ⇒ output is a pure function of counter+key (random-access),
+//  which is what the content generator needs.
 //
-//  Generators are a registry, not a switch: each one lives in its own file and
-//  self-registers (static built-ins via `Register`, kept alive by link_whole; a
-//  generator plugin registers the same way when dlopen'd). Adding a generator is
-//  one new file — no central list to edit (open/closed).
-//
+#include "prfs/di.hpp"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -20,25 +19,25 @@
 
 namespace prfs::rng {
 
-//  128 bits of output from a 128-bit counter (`ctr[4]`) and a 64-bit key
-//  (`key[2]`). Stateless: output depends only on (ctr, key).
-using Gen4 = void (*)(uint32_t const ctr[4], uint32_t const key[2], uint32_t out[4]);
+//  A counter-based generator: 128 bits of output from a 128-bit counter
+//  (`ctr[4]`) and a 64-bit key (`key[2]`). Registered as a di provider named for
+//  the algorithm ("philox", "threefry", …).
+struct IRng {
+    static constexpr std::string_view ID = "prfs.rng/1";
 
-void add(std::string_view name, Gen4); // register a generator
-bool has(std::string_view name);
-Gen4 get(std::string_view name);  // throws std::out_of_range if unknown
-std::vector<std::string> names(); // registered generators (for --help / listing)
-
-//  Run-wide active generator by name: the build sets the default (meson -Drng=…)
-//  and a tool may override it ONCE at startup (e.g. from a --rng flag). A
-//  process-wide policy, not a per-call argument; not safe to change mid-run.
-std::string active();
-void setActive(std::string_view name); // throws std::out_of_range if unknown
-Gen4 activeFn();
-
-//  Self-registration helper: `static rng::Register const r{"philox", &gen};`
-struct Register {
-    Register(std::string_view name, Gen4 g) { add(name, g); }
+    virtual ~IRng() = default;
+    virtual void gen4(uint32_t const ctr[4], uint32_t const key[2], uint32_t out[4]) const = 0;
 };
+
+//  Run-wide active generator by name: the build sets the default (meson -Drng=)
+//  and a tool may override it ONCE at startup. A process-wide policy, not a
+//  per-call argument; not safe to change mid-run.
+std::string active();
+void setActive(std::string_view name); // throws std::out_of_range if unregistered
+IRng const& activeRng();               // resolve the active generator
+
+//  Thin facades over the di registry for the IRng interface.
+bool has(std::string_view name);
+std::vector<std::string> names();
 
 } // namespace prfs::rng

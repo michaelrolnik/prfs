@@ -65,7 +65,8 @@ uint64_t blockSrc(ContentConfig const& c, uint64_t seed, uint64_t b) {
     return h(seed, b, DATA_TAG);
 }
 
-void genBlock(ContentConfig const& c, uint64_t seed, uint64_t b, int K, rng::Gen4 gen, char* buf) {
+void genBlock(ContentConfig const& c, uint64_t seed, uint64_t b, int K, rng::IRng const& gen,
+              char* buf) {
     uint32_t bs = c.blockSize;
     if (isHole(c, seed, b)) {
         std::memset(buf, 0, bs);
@@ -79,7 +80,7 @@ void genBlock(ContentConfig const& c, uint64_t seed, uint64_t b, int K, rng::Gen
     for (uint32_t off = 0, g = 0; off < bs; off += 16, ++g) {
         uint32_t ctr[4] = {bl, bh, g, 0};
         uint32_t out[4];
-        gen(ctr, key, out);
+        gen.gen4(ctr, key, out);
         for (uint32_t i = 0; i < 16 && off + i < bs; ++i) {
             uint8_t raw = uint8_t(out[i / 4] >> (8 * (i % 4)));
             buf[off + i] = char(mapByte(raw, K));
@@ -135,7 +136,7 @@ size_t read(ContentConfig const& c, uint64_t seed, uint64_t size, uint64_t offse
     uint64_t end = std::min<uint64_t>(offset + len, size);
     uint32_t bs = c.blockSize ? c.blockSize : 1;
     int K = alphabet(c.entropy);
-    rng::Gen4 gen = rng::activeFn();
+    rng::IRng const& gen = rng::activeRng();
     std::vector<char> block(bs);
 
     for (uint64_t b = offset / bs, last = (end - 1) / bs; b <= last; ++b) {

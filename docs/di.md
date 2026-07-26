@@ -185,13 +185,14 @@ container while keeping C++ type-safety and RAII and staying within the "C++ int
 
 ---
 
-## 9. Relationship to the `rng` registry
+## 9. `rng` — the first provider
 
-`rng`'s `name → Gen4` map is a special case of this: interface `IRng`, name = the generator
-name. Once `di` lands, rng generators become `IRng` providers and `rng::activeFn()` becomes
-`di::resolve<IRng>(activeName)`. The migration is optional — the current `rng` registry already
-embodies the pattern (self-registering, `link_whole`, no central switch), so it is the working
-prototype of the `di` container.
+The `rng` module is built on this registry. Each generator implements `IRng` (`prfs.rng/1`) and
+self-registers as a di provider named for the algorithm (`di::Register<IRng>{&philox, "philox"}`,
+one file per generator, kept alive by `link_whole`); `content` resolves the active one via
+`di::resolve<IRng>(active())` (wrapped as `rng::activeRng()`). "Which generator" is a di *name*,
+selected by `-Drng=` or `rng::setActive`. It is the container's first real consumer — exercising
+self-registration, `link_whole`, and name-selection end to end.
 
 ---
 
