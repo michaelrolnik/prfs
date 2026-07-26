@@ -54,8 +54,10 @@ those verbatim and skips the generator. Procedural files — the common case —
    returns a short count (EOF). The generator produces exactly `size` bytes of geometry.
 4. **The knobs a backup/archive tool cares about, FS-wide:**
    - **entropy** — bits/byte; *compressibility is the derived `1 − entropy/8`*.
-   - **dedup** — `dedupPercent`, the share of blocks that are duplicates of an FS-wide corpus;
-     dedup ratio ≈ `1 / (1 − dedupPercent/100)`, **independent of total size**.
+   - **dedup** — **whole-filesystem** (cross-file): `dedupPercent` sets the share of blocks that
+     are duplicates of a single FS-wide corpus, so identical blocks recur across *different*
+     files and a backup tool dedups the whole tree. Ratio ≈ `1 / (1 − dedupPercent/100)`,
+     **independent of total size**.
    - **sparseness** — a fraction of blocks that are holes (unallocated, read as zeros).
 
 ---
@@ -90,19 +92,41 @@ fully manifest, which always holds for a large tree. `entropy` is the compressio
 ## 4. Generation — derived per file, per block
 
 Everything is **block-indexed**. For byte offset `o`, `block = o / blockSize`; the provider
-generates the covering block(s) and copies out the requested slice. Blocks are independent, so
-any range is reachable directly (req. 2). Per-file variety comes from mixing the `fileSeed` into
-every derivation — no two files (different node ids) generate the same stream, yet each is
-reproducible.
+classifies that block, generates it, and copies out the requested slice. Blocks are
+independent, so any range is reachable directly (req. 2). Per-file variety comes from mixing the
+`fileSeed` into every derivation — no two files (different node ids) generate the same stream,
+yet each is reproducible.
 
-Mixer (SplitMix64 finalizer; all multiplies wrap mod 2⁶⁴):
+```
+read(C, fileSeed, size, offset, len):
+    end = min(offset + len, size)                      # size wins (req. 3)
+    for b in blocks covering [offset, end):
+        type = classify(C, fileSeed, b)                # hole | dup | unique — pure fn of the hash
+        blk  = genBlock(C, fileSeed, b, type)          # zeros, or entropy-filled from `src`
+        copy blk[max(offset,b·bs) .. min(end,(b+1)·bs)] into out
+    return end - offset                                # short count == EOF
+```
+
+`classify` and `genBlock` are the per-block steps below; both are pure functions of
+`(C, fileSeed, b)`, so `read` needs no state and any sub-range recomputes the same bytes.
+
+**Two random sources, by job** (both counter-based, so both random-access):
+
+- **Decisions** — `h`, a cheap SplitMix64-finalizer avalanche hash, for "is this block a hole?
+  which corpus slot?". We only need good bucketing, so a fast mix is plenty.
+- **Byte fill** — **Philox4x32-10** (Random123), a counter-based RNG built for exactly this:
+  `output = philox(counter, key)` with no streaming state, BigCrush-quality (defensibly
+  incompressible), fast, and ~30 portable lines with no dependencies. Key = the block's `src`
+  seed, counter = `(blockIndex, wordIndex)`. (Popular streaming RNGs — xoshiro/PCG/ChaCha — are
+  *not* naturally addressable and are avoided; AES-CTR is an equal-quality alternative if AES-NI
+  throughput is ever wanted.)
 
 ```
 mix64(x):  x ^= x>>30; x *= 0xbf58476d1ce4e5b9;
            x ^= x>>27; x *= 0x94d049bb133111eb;
-           x ^= x>>31; return x
+           x ^= x>>31; return x                       # all multiplies wrap mod 2⁶⁴
 GOLDEN = 0x9E3779B97F4A7C15
-h(a,b,tag) = mix64(mix64(a*GOLDEN + b) + tag)         # a portable coordinate hash
+h(a,b,tag) = mix64(mix64(a*GOLDEN + b) + tag)         # portable coordinate hash — decisions only
 ```
 
 For file `S`, block `b`, config `C`:
@@ -116,9 +140,9 @@ For file `S`, block `b`, config `C`:
      `1 / (1 − dedupPercent/100)`, independent of total size.
    - **unique:** `src = h(S, b, DATA_TAG)` — unique per (file, block).
 3. **Fill at target entropy.** With `K = clamp(round(2^(8·entropy/255)), 1, 256)` equiprobable
-   symbols: word `j` of the block is `mix64(src + j·GOLDEN)`; each output byte becomes
-   `symbol = value % K` mapped to `symbol·255/(K−1)` (or `0` when `K==1`). The stream then
-   carries `log2(K) ≈ 8·entropy/255` bits/byte, and a compressor reduces it to ≈ that ratio.
+   symbols: draw the block's words from `philox(counter=(b, j), key=src)`; each output byte
+   becomes `symbol = value % K` mapped to `symbol·255/(K−1)` (or `0` when `K==1`). The stream
+   then carries `log2(K) ≈ 8·entropy/255` bits/byte, and a compressor reduces it to ≈ that ratio.
    `entropy=255 ⇒ K=256` incompressible; `entropy=0 ⇒ K=1` constant (fully compressible).
 
 Each step is a pure function of `(S, b, C)` — satisfying reqs. 1–2.
