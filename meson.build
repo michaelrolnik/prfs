@@ -212,6 +212,16 @@ if get_option('plugins')
         name_prefix         : '',
     )
 
+    #   nfsv3 front-end service (→ nfsv3.so). Sockets + threads + spdlog.
+    nfsv3_so = shared_module(
+        'nfsv3',
+        'plugins/nfsv3/nfsv3.cpp',
+        include_directories : [prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],
+        name_prefix         : '',
+        dependencies        : [threads_dep],
+    )
+
     executable(
         'prfs-host',
         'src/host/main.cpp',
@@ -252,7 +262,9 @@ fmt_files = files(
     'src/host/host.cpp',
     'src/host/main.cpp',
     'plugins/null/null.cpp',
+    'plugins/nfsv3/nfsv3.cpp',
     'tests/host/host_test.cpp',
+    'tests/nfsv3/nfsv3_test.cpp',
     'tests/support.hpp',
     'tests/core/clock.cpp',
     'tests/core/contract.cpp',

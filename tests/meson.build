@@ -45,6 +45,16 @@ if get_option('plugins')
         dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
     )
     test('host', test_host, depends : null_so, timeout : 60)
+
+    test_nfsv3 = executable(
+        'test_nfsv3',
+        'nfsv3/nfsv3_test.cpp',
+        include_directories : [test_inc, prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],
+        cpp_args            : ['-DNFSV3_PLUGIN_SO="' + nfsv3_so.full_path() + '"'],
+        dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
+    )
+    test('nfsv3', test_nfsv3, depends : nfsv3_so, timeout : 60)
 endif
 
 #   DI registry is header-only (include/prfs/di.hpp) — links only gtest.
