@@ -4,10 +4,12 @@
 //
 //  perf — a read-performance front-end. On start() it benchmarks the content
 //  generator (the actual work a prfs READ does: bytes = f(ContentConfig, seed,
-//  offset)) single- and multi-threaded, then idles. It measures the *ceiling*
-//  the NFS path can approach — no sockets, no RPC/XDR, and critically no client
-//  page cache — using the store's own content policy so the number reflects what
-//  is actually served.
+//  offset)) single- and multi-threaded, then compares the full store read path
+//  (IHost::read on a real file) against that generator ceiling, then idles. It
+//  measures the *ceiling* the NFS path can approach — no sockets, no RPC/XDR, and
+//  critically no client page cache — using the store's own content policy so the
+//  number reflects what is actually served; the store-path line shows the
+//  per-READ store overhead layered on top of pure generation.
 //
 //    prfs-host --store /tmp/prfs-big --plugin perf.so \
 //      --set perf.threads=16 --set perf.bytes=1G --set perf.blocksize=1M
@@ -108,9 +110,15 @@ struct Perf : IService {
     void stop() override {}
 
 #ifdef PRFS_WITH_CONTENT
-    //  A regular file's (seed, size) so the benchmark mirrors real served
-    //  content; nullopt if the tree has no regular file (yet). Bounded DFS.
-    std::optional<std::pair<uint64_t, uint64_t>> sampleFile() {
+    //  A regular file (its handle + seed/size) so the benchmark mirrors real
+    //  served content and can compare the store read path against the raw
+    //  generator; nullopt if the tree has no regular file (yet). Bounded DFS.
+    struct Sample {
+        Node node;
+        uint64_t seed, size;
+    };
+
+    std::optional<Sample> sampleFile() {
         std::shared_lock<std::shared_mutex> lk(host.storeMutex());
         IPrfs& fs = host.fs();
         std::vector<Node> stack{fs.rwRoot()};
@@ -120,7 +128,7 @@ struct Perf : IService {
             stack.pop_back();
             for (auto& [name, n] : fs.readdir(d)) {
                 if (n->type() == Type::REG) {
-                    return std::make_pair(n->contentSeed(), n->size());
+                    return Sample{n, n->contentSeed(), n->size()};
                 }
                 if (n->type() == Type::DIR) {
                     stack.push_back(n);
@@ -143,10 +151,10 @@ struct Perf : IService {
         }
 
         auto sample = sampleFile();
-        uint64_t seed = opt("perf.seed", "").empty() ? (sample ? sample->first : 1)
+        uint64_t seed = opt("perf.seed", "").empty() ? (sample ? sample->seed : 1)
                                                      : parseSize(opt("perf.seed", "1"), 1);
         uint64_t fsize = opt("perf.size", "").empty()
-                             ? (sample ? sample->second : (1ull << 30))
+                             ? (sample ? sample->size : (1ull << 30))
                              : parseSize(opt("perf.size", "1G"), 1ull << 30);
         if (fsize == 0) {
             fsize = 1ull << 30;
@@ -195,15 +203,47 @@ struct Perf : IService {
             return secs > 0 ? (double(total.load()) / (1u << 20)) / secs : 0.0;
         };
 
+        //  Read `perThread` bytes through the FULL store path (IHost::read: seed
+        //  lookup + ContentConfig fetch + generate), single-threaded, under the
+        //  shared store lock (as nfsv3 does). Returns MiB/s.
+        auto storePass = [&](Node node, uint64_t sz) -> double {
+            std::shared_lock<std::shared_mutex> lk(host.storeMutex());
+            std::vector<char> buf(bs);
+            uint64_t done = 0, off = 0;
+            auto t0 = std::chrono::steady_clock::now();
+            while (done < perThread) {
+                size_t got = host.read(node, off % sz, buf.data(), bs);
+                if (got == 0) {
+                    break;
+                }
+                done += got;
+                off += got;
+            }
+            double secs =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            return secs > 0 ? (double(done) / (1u << 20)) / secs : 0.0;
+        };
+
         double single = pass(1);
-        host.log().info("perf:  1 thread    {:8.1f} MiB/s", single);
+        host.log().info("perf:  1 thread    {:8.1f} MiB/s  (generator ceiling)", single);
         if (threads > 1) {
             double multi = pass(threads);
             host.log().info("perf: {:2d} threads   {:8.1f} MiB/s  ({:.1f}x, {:.1f} MiB/s/core)",
                             threads, multi, single > 0 ? multi / single : 0.0, multi / threads);
         }
-        host.log().info("perf: done (this is the generator ceiling; NFS adds RPC/XDR + kernel "
-                        "overhead, and reads must bypass the client cache to compare)");
+
+        //  The store read path vs the raw generator ceiling: the gap is the
+        //  per-READ store overhead (seed/attr lookup + config fetch) that the
+        //  NFS path also pays on top of pure generation.
+        if (sample) {
+            double store = storePass(sample->node, std::max<uint64_t>(1, sample->size));
+            host.log().info("perf: store path {:8.1f} MiB/s  ({:.0f}% of ceiling)  "
+                            "[IHost::read, 1 thread]",
+                            store, single > 0 ? 100.0 * store / single : 0.0);
+        }
+        host.log().info(
+            "perf: done (generator ceiling is the direct number; NFS adds RPC/XDR + "
+            "kernel overhead on top, and reads must bypass the client cache to compare)");
     }
 #endif
 };
