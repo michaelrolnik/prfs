@@ -284,6 +284,27 @@ struct BigTree : IService {
                         st.links, seed, depth, human(total));
         host.log().info("bigtree: logical size {} across {} snapshots (nothing stored)",
                         human(st.totalSize), snaps.size());
+
+#ifdef PRFS_WITH_CONTENT
+        //  L4 (cheap half): sum the generator's sparse-adjusted allocation over
+        //  every distinct file — what a hole-aware backup target would store for
+        //  the data. `files` holds each REG node once (hardlinks share the node),
+        //  so this is a physical, not per-path, footprint. Cross-file dedup is
+        //  NOT counted here (that's the deferred half); the configured dedup% is
+        //  surfaced as a modeled hint.
+        uint64_t logicalBytes = 0, allocBytes = 0;
+        for (FileRef const& f : files) {
+            uint64_t sz = f.node->size();
+            logicalBytes += sz;
+            allocBytes += content::allocatedBlocks(cc, f.node->contentSeed(), sz) * 512;
+        }
+        double savedPct =
+            logicalBytes ? 100.0 * (1.0 - double(allocBytes) / double(logicalBytes)) : 0.0;
+        host.log().info("bigtree: content footprint — {} allocated of {} logical "
+                        "({:.1f}% saved by {}% sparse holes); dedup {}% (modeled, not counted)",
+                        human(allocBytes), human(logicalBytes), savedPct,
+                        unsigned(cc.sparsePercent), unsigned(cc.dedupPercent));
+#endif
     }
 };
 

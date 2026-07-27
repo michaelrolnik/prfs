@@ -127,6 +127,27 @@ TEST_F(ContentTest, Sparse) {
     EXPECT_LT(half, 10u);
 }
 
+//  The "cheap half" of the footprint/dedup stat (L4): summing allocatedBlocks
+//  over many files yields an aggregate allocation whose shortfall from logical
+//  tracks sparsePercent — this is what the bigtree plugin reports for a tree.
+TEST_F(ContentTest, AllocatedAggregateTracksSparseRatio) {
+    ContentConfig c;
+    c.blockSize = 4096;
+    c.sparsePercent = 25;
+    const uint64_t fileSize = 1u << 20; // 1 MiB
+
+    uint64_t logical = 0, alloc = 0;
+    for (uint64_t seed = 1; seed <= 300; ++seed) {
+        logical += fileSize;
+        alloc += content::allocatedBlocks(c, seed, fileSize) * 512;
+    }
+    ASSERT_GT(logical, 0u);
+    EXPECT_LT(alloc, logical); // holes really reduce allocation
+
+    double savedPct = 100.0 * (1.0 - double(alloc) / double(logical));
+    EXPECT_NEAR(savedPct, 25.0, 3.0); // aggregate holes ≈ sparsePercent
+}
+
 TEST_F(ContentTest, ConfigRoundTrip) {
     ContentConfig c{8192, 200, 10, 25, 1024};
     EXPECT_EQ(content::deserialize(content::serialize(c)), c);
