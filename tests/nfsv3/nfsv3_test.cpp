@@ -12,6 +12,9 @@
 //
 #include "prfs/host.hpp"
 #include "prfs/memstore.hpp"
+#ifdef PRFS_WITH_CONTENT
+#include "prfs/content.hpp"
+#endif
 
 #include <spdlog/sinks/null_sink.h>
 #include <spdlog/spdlog.h>
@@ -743,6 +746,61 @@ TEST(NfsV3, ReaddirPagedStableUnderMutation) {
     ::close(fd);
     loader.stopAll();
 }
+
+#ifdef PRFS_WITH_CONTENT
+//  fattr3 `used` (st_blocks over the mount, what `du` reports) must reflect the
+//  content generator's sparse allocation, not the logical size — a hole-aware
+//  backup target should see the smaller footprint. With a 50%-sparse policy a
+//  file's `used` is ~half its `size`.
+TEST(NfsV3, UsedReflectsSparseAllocation) {
+    const int port = 34578;
+
+    auto fs = makeMemStore();
+    //  A sparse content policy, published to the service at start().
+    content::ContentConfig cc;
+    cc.blockSize = 4096;
+    cc.sparsePercent = 50;
+    fs->setContentConfig(content::serialize(cc));
+
+    Node f = fs->mkfile("");
+    ASSERT_EQ(fs->link(fs->rwRoot(), "big.bin", f), Error::OK);
+    uint64_t const sz = 1u << 20; // 1 MiB
+    f->size(sz);
+
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV3_PLUGIN_SO));
+    loader.startServices();
+
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+    Reply mnt = rpc(fd, PROG_MOUNT, MOUNT_V3, 1, strArg("/"));
+    ASSERT_EQ(mnt.astat, 0u);
+    uint64_t rid = get64(&mnt.body[8]), rs = get64(&mnt.body[16]);
+
+    std::vector<uint8_t> lk = fhArg(rid, rs);
+    {
+        auto n = strArg("big.bin");
+        lk.insert(lk.end(), n.begin(), n.end());
+    }
+    Reply lr = rpc(fd, PROG_NFS, NFS_V3, 3, lk);
+    ASSERT_EQ(get32(&lr.body[0]), 0u);
+    uint64_t bid = get64(&lr.body[8]), bsnap = get64(&lr.body[16]);
+
+    Reply g = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(bid, bsnap)); // GETATTR
+    ASSERT_EQ(get32(&g.body[0]), 0u);
+    uint64_t size = get64(&g.body[4 + 20]); // fattr3 size
+    uint64_t used = get64(&g.body[4 + 28]); // fattr3 used (st_blocks bytes)
+    EXPECT_EQ(size, sz);
+    EXPECT_GT(used, 0u);
+    EXPECT_LT(used, size); // ~half allocated: 50% of blocks are holes
+
+    ::close(fd);
+    loader.stopAll();
+}
+#endif
 
 //  Browsing `.snapshot/N` must yield the node's snapshot view, with a distinct
 //  fsid — otherwise the client sees it as the live node and loops (ELOOP).

@@ -262,9 +262,9 @@ if get_option('plugins')
         'plugins/nfsv3/nfsv3.cpp',
         include_directories : [prfs_inc, spdlog_inc, asio_inc],
         override_options    : ['warning_level=0'],
-        cpp_args            : ['-DASIO_STANDALONE'],
+        cpp_args            : ['-DASIO_STANDALONE'] + bigtree_args, # +content for sparse `used`
         name_prefix         : '',
-        dependencies        : [threads_dep, prfs_nfs_dep],
+        dependencies        : [threads_dep, prfs_nfs_dep] + bigtree_deps,
     )
 
     #   luactl — live Lua console over a unix socket (→ luactl.so). Reuses the

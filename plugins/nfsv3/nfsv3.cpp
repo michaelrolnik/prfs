@@ -34,6 +34,9 @@
 //
 #include "prfs/fsstat.hpp"
 #include "prfs/plugin.hpp"
+#ifdef PRFS_WITH_CONTENT
+#include "prfs/content.hpp"
+#endif
 
 #include <asio.hpp>
 #include <spdlog/spdlog.h>
@@ -292,6 +295,29 @@ uint32_t ftype3(Type t) {
     return kFtype3[size_t(t)];
 }
 
+//  fattr3 `used` (bytes st_blocks*512 — what `du` reports) should reflect the
+//  content generator's sparse allocation, not the logical size. The content
+//  policy is process-wide and set before serving, so the service publishes it
+//  once at start() and the (free) fattr encoder reads it lock-free. Without a
+//  policy (or without content compiled) `used` == `size`, as before.
+#ifdef PRFS_WITH_CONTENT
+struct UsedPolicy {
+    std::atomic<bool> ready{false};
+    content::ContentConfig cfg;
+};
+
+UsedPolicy g_used;
+
+uint64_t usedBytes(INode& n) {
+    if (n.type() == Type::REG && g_used.ready.load(std::memory_order_acquire)) {
+        return content::allocatedBlocks(g_used.cfg, n.contentSeed(), n.size()) * 512;
+    }
+    return n.size();
+}
+#else
+uint64_t usedBytes(INode& n) { return n.size(); }
+#endif
+
 void encodeFattr(Writer& w, INode& n) {
     uint32_t maj = 0, min = 0;
     if (n.type() == Type::BLK || n.type() == Type::CHR) {
@@ -305,7 +331,7 @@ void encodeFattr(Writer& w, INode& n) {
     w.u32(n.uid());
     w.u32(n.gid());
     w.u64(n.size());
-    w.u64(n.size());          // used ≈ size (content is synthetic)
+    w.u64(usedBytes(n));      // used = sparse-aware st_blocks (see UsedPolicy)
     w.u32(maj);               // specdata3.specdata1
     w.u32(min);               // specdata3.specdata2
     uint64_t snap = n.snap(); // the view this handle reads at
@@ -453,6 +479,24 @@ public:
         std::string ps = m_host.option("port");
         int port = ps.empty() ? 2049 : std::atoi(ps.c_str());
         m_advance = m_host.option("time-advance") == "1"; // bump clock per mutation
+
+#ifdef PRFS_WITH_CONTENT
+        //  Publish the content policy so fattr3 `used` reports sparse-aware
+        //  st_blocks (see UsedPolicy). Done before the io-threads spawn, so it's
+        //  visible to them; a later setContentConfig change needs a restart.
+        //  Reset first so each start() re-evaluates for its own store.
+        g_used.ready.store(false, std::memory_order_release);
+        std::string cfgBlob = m_host.fs().contentConfig();
+        if (!cfgBlob.empty()) {
+            try {
+                g_used.cfg = content::deserialize(cfgBlob);
+                g_used.ready.store(true, std::memory_order_release);
+            } catch (std::exception const& e) {
+                m_host.log().warn("nfsv3: content config parse failed, `used` = size: {}",
+                                  e.what());
+            }
+        }
+#endif
 
         try {
             m_ctx.restart(); // reusable after a prior stop()
