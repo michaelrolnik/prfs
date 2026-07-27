@@ -19,6 +19,7 @@ Resolved (or a reopened Open section).
 | B7  | 🟡  | ✅     | `size` vs content block-structure authority            | T7   |
 | B8  | 🟡  | ✅     | `linkMode` in schema ahead of decision                 | T8   |
 | B9  | 🟡  | ✅     | `stats().links` undercounted orphan-dir entries        | S9   |
+| B10 | 🟠  | ✅     | Parent dir mtime/ctime not updated on namespace change | L2   |
 
 ---
 
@@ -108,3 +109,21 @@ still contain children). Design §9 defines `links` as `±1` per link/unlink wit
 condition (matching the reference oracle). Fixed in `src/core/prfs.cpp`: count down-links over
 *all* dirs with a live record (`eachEffNode`, no `nlink` filter); node counts keep the `nlink>0`
 liveness filter inline. Caught by the differential harness (`tests/test_diff.cpp`).
+
+### B10 — parent directory mtime/ctime not updated on namespace change 🟠 ✅
+
+Found running **pjdfstest** over an NFS mount (`scripts/pjdfstest.sh`). A create/remove/rename in a
+directory stamped the *child* node's times but left the **parent directory's `mtime`/`ctime`
+frozen** (e.g. `mkdir/00.t` 33-34, `rmdir/00.t` 8-9, and the parent-time checks in
+`link`/`unlink`/`rename`). This matters for prfs's own purpose: a backup tool that detects changed
+directories by `mtime` would *miss* dirs whose entries were added or removed. The store
+deliberately leaves link/unlink timestamps to the caller (design §3.5; `memstore.cpp`: "link/unlink
+do NOT auto-touch mtime/ctime; callers set times explicitly"), and the nfsv3 front-end simply
+wasn't stamping the parent. Fixed in `plugins/nfsv3/nfsv3.cpp`: a `touchDir()` helper sets the
+parent's `mtime = ctime = now()` after a successful CREATE/MKDIR/SYMLINK/MKNOD (via `finishCreate`),
+REMOVE, RMDIR, RENAME (both dirs), and LINK — before the `dir_wcc` is encoded, so the reply's
+weak-cache-consistency attrs reflect the change. Only reached for live dirs (snapshot dirs `ROFS`
+out first). Reproduction test `tests/nfsv3/nfsv3_test.cpp::ParentDirTimestampsOnMutation` (RED
+before, GREEN after); the store/oracle are unchanged, so the differential suite is unaffected.
+(Permission/ownership/timestamp-vs-wallclock failures pjdfstest also reports are **by design** —
+prfs enforces no Unix modes and uses a deterministic logical clock.)
