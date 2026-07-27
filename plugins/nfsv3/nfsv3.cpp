@@ -1155,6 +1155,17 @@ private:
     }
 
     //  Finish a create verb: link the new child, then encode the result.
+    //  A namespace change bumps the parent directory's mtime and ctime (POSIX).
+    //  The store leaves link/unlink timestamps to the caller (memstore.cpp), so we
+    //  stamp them here — tools that detect changed directories by mtime need it.
+    //  Only ever called on live dirs (snapshot dirs ROFS out before any mutation),
+    //  and before the dir_wcc is encoded so the reply reflects the new times.
+    void touchDir(Node const& dir) {
+        uint64_t t = m_host.fs().now();
+        dir->mtime(t);
+        dir->ctime(t);
+    }
+
     uint32_t finishCreate(Writer& w, Node dir, PreAttr pre, std::string const& name, Node child) {
         Error e = m_host.fs().link(dir, name, child);
         if (e != Error::OK) {
@@ -1162,6 +1173,7 @@ private:
             encodeWcc(w, pre, dir.get());
             return SUCCESS;
         }
+        touchDir(dir);
         w.u32(NFS3_OK);
         encodeNewObject(w, child, pre, dir.get());
         return SUCCESS;
@@ -1280,6 +1292,9 @@ private:
             return SUCCESS;
         }
         Error e = fs.unlink(dir, name);
+        if (e == Error::OK) {
+            touchDir(dir);
+        }
         w.u32(toNfsStat(e));
         encodeWcc(w, pre, dir.get());
         return SUCCESS;
@@ -1303,6 +1318,9 @@ private:
             st = NFS3ERR_NOTEMPTY;
         } else {
             st = toNfsStat(fs.unlink(dir, name));
+            if (st == NFS3_OK) {
+                touchDir(dir);
+            }
         }
         w.u32(st);
         encodeWcc(w, pre, dir.get());
@@ -1337,6 +1355,10 @@ private:
         uint32_t st = NFS3ERR_ROFS;
         if (live(fsnap) && live(tsnap)) {
             st = toNfsStat(fs.move(fromDir, fromName, toDir, toName));
+            if (st == NFS3_OK) {
+                touchDir(fromDir);
+                touchDir(toDir); // may be the same node — a second stamp is harmless
+            }
         }
         w.u32(st);
         encodeWcc(w, fpre, fromDir.get()); // fromdir_wcc
@@ -1368,6 +1390,9 @@ private:
         }
         PreAttr pre = preOf(dir.get());
         uint32_t st = live(dsnap) ? toNfsStat(fs.link(dir, name, file)) : NFS3ERR_ROFS;
+        if (st == NFS3_OK) {
+            touchDir(dir);
+        }
         w.u32(st);
         encodePostOp(w, file.get());  // file_attributes
         encodeWcc(w, pre, dir.get()); // linkdir_wcc

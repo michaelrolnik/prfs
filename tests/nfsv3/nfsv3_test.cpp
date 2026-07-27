@@ -554,6 +554,74 @@ TEST(NfsV3, TimeAdvance) {
     loader.stopAll();
 }
 
+//  A namespace change (create/remove/rename) must bump the PARENT directory's
+//  mtime and ctime (POSIX). The store leaves link/unlink timestamps to the caller
+//  (memstore.cpp), so nfsv3 stamps them. Regression for the gap pjdfstest
+//  surfaced: without it a backup tool that detects changed directories by mtime
+//  would miss dirs whose entries were added or removed.
+TEST(NfsV3, ParentDirTimestampsOnMutation) {
+    const int port = 34576;
+
+    auto fs = makeMemStore();
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    h.setOption("time-advance", "1"); // each mutation advances the logical clock
+
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV3_PLUGIN_SO));
+    loader.startServices();
+
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    Reply mnt = rpc(fd, PROG_MOUNT, MOUNT_V3, 1, strArg("/"));
+    ASSERT_EQ(mnt.astat, 0u);
+    uint64_t rid = get64(&mnt.body[8]);
+    uint64_t rs = get64(&mnt.body[16]);
+
+    fs->setTime(1000); // root was created at clock 0; advance so stamps are visible
+
+    auto mtimeOf = [&]() {
+        Reply g = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(rid, rs));
+        return get32(&g.body[4 + 68]); // fattr3 mtime seconds
+    };
+    auto ctimeOf = [&]() {
+        Reply g = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(rid, rs));
+        return get32(&g.body[4 + 76]); // fattr3 ctime seconds
+    };
+    auto mkdirIn = [&](std::string const& name) {
+        std::vector<uint8_t> a = fhArg(rid, rs);
+        std::vector<uint8_t> nm = strArg(name);
+        a.insert(a.end(), nm.begin(), nm.end());
+        for (int i = 0; i < 6; ++i) {
+            put32(a, 0); // sattr3 unset
+        }
+        ASSERT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 9, a).body[0]), 0u); // MKDIR OK
+    };
+    auto rmdirIn = [&](std::string const& name) {
+        std::vector<uint8_t> a = fhArg(rid, rs);
+        std::vector<uint8_t> nm = strArg(name);
+        a.insert(a.end(), nm.begin(), nm.end());
+        ASSERT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 13, a).body[0]), 0u); // RMDIR OK
+    };
+
+    uint32_t m0 = mtimeOf(), c0 = ctimeOf();
+
+    mkdirIn("sub"); // creating an entry must touch the parent directory
+    uint32_t m1 = mtimeOf(), c1 = ctimeOf();
+    EXPECT_GT(m1, m0); // parent mtime advanced (FAILS without the fix)
+    EXPECT_GT(c1, c0); // parent ctime advanced
+
+    rmdirIn("sub"); // removing an entry must touch the parent directory too
+    uint32_t m2 = mtimeOf(), c2 = ctimeOf();
+    EXPECT_GT(m2, m1);
+    EXPECT_GT(c2, c1);
+
+    ::close(fd);
+    loader.stopAll();
+}
+
 //  Browsing `.snapshot/N` must yield the node's snapshot view, with a distinct
 //  fsid — otherwise the client sees it as the live node and loops (ELOOP).
 TEST(NfsV3, SnapshotBrowse) {
