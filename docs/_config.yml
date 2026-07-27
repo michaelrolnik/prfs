@@ -1,0 +1,3 @@
+title: prfs — Pseudo-Random File System
+description: A synthetic NFS target for testing archive/backup tools — content is generated from a seed, never stored.
+theme: jekyll-theme-cayman
