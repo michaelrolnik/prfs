@@ -20,6 +20,7 @@ Resolved (or a reopened Open section).
 | B8  | 🟡  | ✅     | `linkMode` in schema ahead of decision                 | T8   |
 | B9  | 🟡  | ✅     | `stats().links` undercounted orphan-dir entries        | S9   |
 | B10 | 🟠  | ✅     | Parent dir mtime/ctime not updated on namespace change | L2   |
+| B11 | 🟠  | ✅     | READDIR skipped/duplicated entries under mid-scan mutation | L2   |
 
 ---
 
@@ -127,3 +128,24 @@ out first). Reproduction test `tests/nfsv3/nfsv3_test.cpp::ParentDirTimestampsOn
 before, GREEN after); the store/oracle are unchanged, so the differential suite is unaffected.
 (Permission/ownership/timestamp-vs-wallclock failures pjdfstest also reports are **by design** —
 prfs enforces no Unix modes and uses a deterministic logical clock.)
+
+### B11 — READDIR skipped/duplicated entries under mid-scan mutation 🟠 ✅
+
+The nfsv3 READDIR/READDIRPLUS handlers re-listed the whole directory on every call
+and numbered entries by **ordinal position**, using the position as the NFS
+cookie. Two problems: (1) **O(n) per page** ⇒ O(n²) to walk a large directory; and
+(2) **not stable** — if an entry was added or removed between paged calls, every
+ordinal after it shifted, so a client resuming from its saved cookie could **skip
+or duplicate** a surviving entry (the classic NFS readdir hazard; a tree-walking
+backup tool over a live filesystem would silently miss or double-count files).
+The store already had a stable name-cursor (`readdirPage`, design §6.2, B4) that
+resumes by *name*, but the front-end didn't use it. Fixed in
+`plugins/nfsv3/nfsv3.cpp`: both handlers now page via `readdirPage` (O(page)), and
+the NFS 64-bit cookie is bridged to the name cursor by a per-name FNV hash (top
+bit set; reserved small values for `.`/`..`) plus a bounded `cookie→name` cache
+(miss ⇒ a scan that recovers a still-present entry, else `NFS3ERR_BAD_COOKIE` so
+the client restarts — RFC 1813 permits it). Test-first regression
+`tests/nfsv3/nfsv3_test.cpp::ReaddirPagedStableUnderMutation`: pages a directory
+while removing an entry behind the cursor and asserts no survivor is skipped or
+duplicated — RED with the ordinal scheme (skipped `e2`), GREEN with the
+name-cursor. Store/oracle unchanged.

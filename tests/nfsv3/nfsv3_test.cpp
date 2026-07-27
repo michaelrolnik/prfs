@@ -622,6 +622,128 @@ TEST(NfsV3, ParentDirTimestampsOnMutation) {
     loader.stopAll();
 }
 
+//  Paged READDIR must be stable under a concurrent mutation: an entry removed
+//  *behind* the cursor mid-scan must not cause a surviving entry *ahead* of the
+//  cursor to be skipped (or duplicated). The old ordinal-cookie scheme re-lists
+//  the whole dir per page and renumbers on every change, so removing a seen entry
+//  shifts ordinals and skips the next one; a name-cursor (readdirPage) resumes by
+//  name and is immune. Also exercises multi-page paging over a larger directory.
+TEST(NfsV3, ReaddirPagedStableUnderMutation) {
+    const int port = 34577;
+
+    auto fs = makeMemStore();
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV3_PLUGIN_SO));
+    loader.startServices();
+
+    //  /big with e0..e9 (single-digit names sort lexically e0<e1<...<e9).
+    Node big = fs->mkdir();
+    ASSERT_EQ(fs->link(fs->rwRoot(), "big", big), Error::OK);
+    for (int i = 0; i < 10; ++i) {
+        Node f = fs->mkfile("");
+        ASSERT_EQ(fs->link(big, "e" + std::to_string(i), f), Error::OK);
+    }
+
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+    Reply mnt = rpc(fd, PROG_MOUNT, MOUNT_V3, 1, strArg("/"));
+    ASSERT_EQ(mnt.astat, 0u);
+    uint64_t rid = get64(&mnt.body[8]), rs = get64(&mnt.body[16]);
+
+    //  LOOKUP big → its filehandle (LOOKUP3resok: object fh3, then attrs).
+    std::vector<uint8_t> lk = fhArg(rid, rs);
+    {
+        auto n = strArg("big");
+        lk.insert(lk.end(), n.begin(), n.end());
+    }
+    Reply lr = rpc(fd, PROG_NFS, NFS_V3, 3, lk);
+    ASSERT_EQ(get32(&lr.body[0]), 0u);
+    ASSERT_EQ(get32(&lr.body[4]), 16u); // fh length
+    uint64_t bid = get64(&lr.body[8]), bsnap = get64(&lr.body[16]);
+
+    //  One READDIR page; appends (name,cookie) store entries (skips . / ..), and
+    //  returns eof. Echoes back whatever cookie the server assigned each entry.
+    auto page = [&](uint64_t cookie, std::vector<std::pair<std::string, uint64_t>>& out) -> bool {
+        std::vector<uint8_t> a = fhArg(bid, bsnap);
+        putU64(a, cookie);
+        put32(a, 0);
+        put32(a, 0);   // cookieverf[8]
+        put32(a, 200); // small count → forces multiple pages
+        Reply rr = rpc(fd, PROG_NFS, NFS_V3, 16, a);
+        EXPECT_EQ(rr.astat, 0u);
+        EXPECT_EQ(get32(&rr.body[0]), 0u);
+        size_t o = 100; // status(4) + dir_attributes(88) + cookieverf(8)
+        while (get32(&rr.body[o]) == 1) {
+            o += 4 + 8; // value-follows + fileid
+            uint32_t nl = get32(&rr.body[o]);
+            o += 4;
+            std::string nm(reinterpret_cast<char const*>(&rr.body[o]), nl);
+            o += pad4(nl);
+            uint64_t ck = get64(&rr.body[o]);
+            o += 8;
+            out.push_back({nm, ck});
+        }
+        o += 4; // value-follows == 0
+        return get32(&rr.body[o]) == 1;
+    };
+
+    std::vector<std::string> seen; // store entries seen across the whole scan
+    auto sawDup = [&](std::string const& n) {
+        return std::find(seen.begin(), seen.end(), n) != seen.end();
+    };
+
+    uint64_t cookie = 0;
+    bool eof = false, mutated = false;
+    std::string cursor; // last store entry seen
+    for (int guard = 0; !eof && guard < 100; ++guard) {
+        std::vector<std::pair<std::string, uint64_t>> ents;
+        eof = page(cookie, ents);
+        for (auto& [nm, ck] : ents) {
+            cookie = ck; // resume after the last entry
+            if (nm == "." || nm == "..") {
+                continue;
+            }
+            EXPECT_FALSE(sawDup(nm)) << "duplicate entry: " << nm;
+            seen.push_back(nm);
+            cursor = nm;
+        }
+        //  Once we've seen ≥2 store entries, remove one strictly behind the
+        //  cursor (already returned), then keep paging.
+        if (!mutated && seen.size() >= 2) {
+            std::string victim; // smallest seen name != cursor ⇒ behind the cursor
+            for (auto const& s : seen) {
+                if (s != cursor) {
+                    victim = s;
+                    break;
+                }
+            }
+            ASSERT_FALSE(victim.empty());
+            std::vector<uint8_t> rm = fhArg(bid, bsnap);
+            {
+                auto n = strArg(victim);
+                rm.insert(rm.end(), n.begin(), n.end());
+            }
+            ASSERT_EQ(get32(&rpc(fd, PROG_NFS, NFS_V3, 12, rm).body[0]), 0u); // REMOVE OK
+            mutated = true;
+        }
+    }
+
+    //  Every original entry must have appeared exactly once: the victim was seen
+    //  before removal; every survivor ahead of the cursor must NOT be skipped.
+    EXPECT_TRUE(eof);
+    EXPECT_TRUE(mutated);
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_TRUE(sawDup("e" + std::to_string(i))) << "skipped survivor: e" << i;
+    }
+    EXPECT_EQ(seen.size(), 10u);
+
+    ::close(fd);
+    loader.stopAll();
+}
+
 //  Browsing `.snapshot/N` must yield the node's snapshot view, with a distinct
 //  fsid — otherwise the client sees it as the live node and loops (ELOOP).
 TEST(NfsV3, SnapshotBrowse) {

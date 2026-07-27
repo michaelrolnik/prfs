@@ -47,6 +47,7 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -104,7 +105,7 @@ constexpr uint32_t MNT3_OK = 0;
 constexpr uint32_t NFS3_OK = 0, NFS3ERR_PERM = 1, NFS3ERR_NOENT = 2, NFS3ERR_EXIST = 17,
                    NFS3ERR_NOTDIR = 20, NFS3ERR_ISDIR = 21, NFS3ERR_INVAL = 22, NFS3ERR_FBIG = 27,
                    NFS3ERR_ROFS = 30, NFS3ERR_NOTEMPTY = 66, NFS3ERR_STALE = 70,
-                   NFS3ERR_BADTYPE = 10007;
+                   NFS3ERR_BAD_COOKIE = 10003, NFS3ERR_BADTYPE = 10007;
 
 //  RPC auth flavors we care about (RFC 5531). AUTH_SYS carries uid/gid.
 constexpr uint32_t AUTH_SYS = 1;
@@ -415,26 +416,26 @@ struct DirEnt {
     Node node;
 };
 
-//  Build a directory's entry list with monotonic cookies. "." and ".." lead
-//  (".." resolves via the first parent, or self at the root), then the store's
-//  entries in its stable order. The synthesized ".snapshot" is deliberately NOT
-//  listed — it stays resolvable by name (LOOKUP) but hidden from readdir, the
-//  NetApp convention, so backup tools walking the tree don't descend into every
-//  snapshot. cookie = 1-based position, so cookie 0 means "from the start" and a
-//  resume drops every entry with cookie <= the client's.
-std::vector<DirEnt> listDir(IPrfs& fs, Node dir) {
-    std::vector<DirEnt> out;
-    out.push_back({".", 0, dir});
-    std::vector<Node> ps = fs.parents(dir);
-    Node parent = ps.empty() ? dir : ps.front();
-    out.push_back({"..", 0, parent});
-    for (auto& [name, node] : fs.readdir(dir)) {
-        out.push_back({name, 0, node});
+//  READDIR cookie space (an opaque u64 the client echoes back to resume). Small
+//  reserved values page the synthesized "." / ".." entries; a real entry's cookie
+//  is a 64-bit hash of its NAME with the top bit set, so it never collides with
+//  the reserved values and lets us resume the store's name-cursor (readdirPage)
+//  by name — stable under concurrent add/remove, unlike a positional ordinal
+//  (which shifts on every change and can skip/duplicate entries mid-scan). The
+//  synthesized ".snapshot" is deliberately NOT listed (LOOKUP-able but hidden,
+//  the NetApp convention, so tree-walkers don't descend into every snapshot).
+constexpr uint64_t CK_START = 0;                 // before "."
+constexpr uint64_t CK_DOT = 1;                   // after "."
+constexpr uint64_t CK_DOTDOT = 2;                // after ".."
+constexpr uint64_t CK_ENTRY = uint64_t(1) << 63; // real store entries
+
+uint64_t nameCookie(std::string const& name) {
+    uint64_t h = 1469598103934665603ull; // FNV-1a/64
+    for (unsigned char c : name) {
+        h ^= c;
+        h *= 1099511628211ull;
     }
-    for (size_t i = 0; i < out.size(); ++i) {
-        out[i].cookie = i + 1;
-    }
-    return out;
+    return h | CK_ENTRY;
 }
 
 class NfsV3 : public IService {
@@ -806,6 +807,102 @@ private:
         return SUCCESS;
     }
 
+    //  Remember a store entry's cookie→name so a later resume is O(1). Bounded;
+    //  on overflow it clears (a miss then falls back to a scan, so correctness is
+    //  preserved). Guarded independently of the store lock.
+    void rememberCookie(uint64_t ck, std::string const& name) {
+        std::lock_guard<std::mutex> lk(m_ckMu);
+        if (m_ckName.size() >= CK_CACHE_MAX) {
+            m_ckName.clear();
+        }
+        m_ckName[ck] = name;
+    }
+
+    //  The name to resume readdirPage *after*, for a store-entry cookie. Cache hit
+    //  is O(1); a miss (eviction / server restart) falls back to a scan that finds
+    //  the entry if still present, else nullopt ⇒ NFS3ERR_BAD_COOKIE (the client
+    //  restarts the scan, which RFC 1813 permits).
+    std::optional<std::string> resumeName(IPrfs& fs, Node const& dir, uint64_t ck) {
+        {
+            std::lock_guard<std::mutex> lk(m_ckMu);
+            auto it = m_ckName.find(ck);
+            if (it != m_ckName.end()) {
+                return it->second;
+            }
+        }
+        std::string after;
+        for (;;) {
+            DirPage pg = fs.readdirPage(dir, after, 256);
+            for (auto const& [name, node] : pg.entries) {
+                if (nameCookie(name) == ck) {
+                    return name;
+                }
+            }
+            if (pg.entries.empty() || pg.eof) {
+                return std::nullopt;
+            }
+            after = pg.cookie; // last name of the page
+        }
+    }
+
+    //  Collect the entries for one READDIR(PLUS) reply starting after `cookie`,
+    //  keeping the reply within `maxBytes` (`perEntry` = fixed per-entry overhead
+    //  beyond name/fileid/cookie). Pages the store's stable name-cursor so it is
+    //  O(page) and immune to positional shifts. Fills `out`, sets `eof`; returns
+    //  NFS3ERR_BAD_COOKIE if the cookie can't be resumed.
+    uint32_t pageDir(IPrfs& fs, Node const& dir, uint64_t cookie, size_t maxBytes, size_t perEntry,
+                     std::vector<DirEnt>& out, bool& eof) {
+        eof = false;
+        size_t budget = 128; // header the caller already wrote
+        auto fits = [&](std::string const& name) {
+            size_t esz = 4 + 8 + 4 + pad4(name.size()) + 8 + perEntry;
+            if (budget + esz > maxBytes) {
+                return false;
+            }
+            budget += esz;
+            return true;
+        };
+
+        if (cookie < CK_DOT) { // start ⇒ synthesize "."
+            if (!fits(".")) {
+                return NFS3_OK;
+            }
+            out.push_back({".", CK_DOT, dir});
+        }
+        if (cookie < CK_DOTDOT) { // then ".." (first parent, or self at root)
+            if (!fits("..")) {
+                return NFS3_OK;
+            }
+            std::vector<Node> ps = fs.parents(dir);
+            out.push_back({"..", CK_DOTDOT, ps.empty() ? dir : ps.front()});
+        }
+
+        std::string after;
+        if (cookie & CK_ENTRY) { // resume mid-directory after a real entry
+            auto rn = resumeName(fs, dir, cookie);
+            if (!rn) {
+                return NFS3ERR_BAD_COOKIE;
+            }
+            after = *rn;
+        }
+        for (;;) {
+            DirPage pg = fs.readdirPage(dir, after, 512);
+            for (auto& [name, node] : pg.entries) {
+                if (!fits(name)) {
+                    return NFS3_OK; // budget reached; eof stays false
+                }
+                uint64_t ck = nameCookie(name);
+                rememberCookie(ck, name);
+                out.push_back({name, ck, node});
+            }
+            if (pg.entries.empty() || pg.eof) {
+                eof = true;
+                return NFS3_OK;
+            }
+            after = pg.cookie;
+        }
+    }
+
     uint32_t nfsReaddir(Reader& r, Writer& w) {
         IPrfs& fs = m_host.fs();
         uint64_t id, snap;
@@ -828,27 +925,23 @@ private:
             encodePostOp(w, dir.get());
             return SUCCESS;
         }
-        std::vector<DirEnt> ents = listDir(fs, dir);
+        std::vector<DirEnt> ents;
+        bool eof = false;
+        uint32_t st = pageDir(fs, dir, cookie, count, 0, ents, eof);
+        if (st != NFS3_OK) {
+            w.u32(st);
+            encodePostOp(w, dir.get());
+            return SUCCESS;
+        }
         w.u32(NFS3_OK);
         encodePostOp(w, dir.get()); // dir_attributes
         w.u32(0);                   // cookieverf[8]
         w.u32(0);
-        size_t budget = 128; // rough allowance for the header already written
-        bool eof = true;
         for (DirEnt const& e : ents) {
-            if (e.cookie <= cookie) {
-                continue;
-            }
-            size_t esz = 4 + 8 + 4 + pad4(e.name.size()) + 8;
-            if (budget + esz > count) {
-                eof = false;
-                break;
-            }
             w.u32(1); // value-follows
             w.u64(viewFileid(e.node->id(), e.node->snap()));
             w.str(e.name);
             w.u64(e.cookie);
-            budget += esz;
         }
         w.u32(0); // end of entries
         w.u32(eof ? 1 : 0);
@@ -878,24 +971,21 @@ private:
             encodePostOp(w, dir.get());
             return SUCCESS;
         }
-        std::vector<DirEnt> ents = listDir(fs, dir);
+        std::vector<DirEnt> ents;
+        bool eof = false;
+        //  per-entry overhead beyond name/fileid/cookie: post_op_attr (1+fattr3 =
+        //  88) + post_op_fh3 (1 + fh = 4 + 20 = 24).
+        uint32_t st = pageDir(fs, dir, cookie, maxcount, 88 + 24, ents, eof);
+        if (st != NFS3_OK) {
+            w.u32(st);
+            encodePostOp(w, dir.get());
+            return SUCCESS;
+        }
         w.u32(NFS3_OK);
         encodePostOp(w, dir.get());
         w.u32(0); // cookieverf[8]
         w.u32(0);
-        size_t budget = 128;
-        bool eof = true;
         for (DirEnt const& e : ents) {
-            if (e.cookie <= cookie) {
-                continue;
-            }
-            //  entry + present post_op_attr (1 + fattr3 = 88) + present
-            //  post_op_fh3 (1 + fh = 4 + 20).
-            size_t esz = 4 + 8 + 4 + pad4(e.name.size()) + 8 + 88 + 24;
-            if (budget + esz > maxcount) {
-                eof = false;
-                break;
-            }
             w.u32(1); // value-follows
             w.u64(viewFileid(e.node->id(), e.node->snap()));
             w.str(e.name);
@@ -903,7 +993,6 @@ private:
             encodePostOp(w, e.node.get());      // name_attributes
             w.u32(1);                           // name_handle present
             w.fh(e.node->id(), e.node->snap()); // child's own snap view
-            budget += esz;
         }
         w.u32(0); // end of entries
         w.u32(eof ? 1 : 0);
@@ -1478,6 +1567,12 @@ private:
     std::optional<tcp::acceptor> m_acc;
     std::vector<std::thread> m_threads;
     std::atomic<bool> m_running{false};
+
+    //  READDIR cookie→resume-name bridge (see nameCookie/resumeName). Bounded;
+    //  guarded independently of the store lock since READDIR holds it shared.
+    static constexpr size_t CK_CACHE_MAX = 1u << 16;
+    std::mutex m_ckMu;
+    std::unordered_map<uint64_t, std::string> m_ckName;
 };
 
 class NfsV3Plugin : public IPlugin {
