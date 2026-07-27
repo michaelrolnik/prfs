@@ -249,15 +249,19 @@ bytes = `f(ContentConfig, seed, offset)`), not disk I/O, and it parallelizes: th
 store lock is taken only *shared* for reads. `perf` times the generator directly
 — no sockets, no RPC/XDR, and no client page cache — using the store's own
 `ContentConfig` (sampled from a real file's seed/size when present), and reports
-single- and multi-thread MiB/s plus the scaling factor. It is the **ceiling** the
-NFS path approaches; a mount adds RPC/XDR + kernel-NFS overhead and must be
-measured cache-bypassed. Options via `--set perf.*`: `bytes` (per thread),
-`threads` (0 = hardware concurrency), `blocksize`, `seed`, `size`.
+single- and multi-thread MiB/s plus the scaling factor, then reads the same bytes
+through the full store path (`IHost::read`: seed lookup + `ContentConfig` fetch +
+generate) and reports it **as a percentage of that generator ceiling** — the gap
+is the per-READ store overhead the NFS path also pays. It is the ceiling the NFS
+path approaches; a mount adds RPC/XDR + kernel-NFS overhead and must be measured
+cache-bypassed. Options via `--set perf.*`: `bytes` (per thread), `threads` (0 =
+hardware concurrency), `blocksize`, `seed`, `size`.
 
 ```
 prfs-host --store /tmp/prfs-big --plugin perf.so --set perf.threads=16
-# perf:  1 thread     83.6 MiB/s
-# perf: 16 threads   957.5 MiB/s  (11.5x, 59.8 MiB/s/core)
+# perf:  1 thread     84.0 MiB/s  (generator ceiling)
+# perf: 16 threads   948.0 MiB/s  (11.3x, 59.2 MiB/s/core)
+# perf: store path    84.2 MiB/s  (100% of ceiling)  [IHost::read, 1 thread]
 ```
 
 ### Gotcha: client page cache vs. generated content

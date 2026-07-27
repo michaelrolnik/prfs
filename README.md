@@ -143,14 +143,43 @@ own content policy, so it's the ceiling the NFS path approaches:
 ```bash
 ./build/prfs-host --store /tmp/prfs --plugin ./build/perf.so \
   --set perf.threads=16 --set perf.bytes=1G --set perf.blocksize=1M
-# perf:  1 thread     83.6 MiB/s
-# perf: 16 threads   957.5 MiB/s  (11.5x, 59.8 MiB/s/core)
+# perf:  1 thread     84.0 MiB/s  (generator ceiling)
+# perf: 16 threads   948.0 MiB/s  (11.3x, 59.2 MiB/s/core)
+# perf: store path    84.2 MiB/s  (100% of ceiling)  [IHost::read, 1 thread]
 ```
+
+The **store path** line reads through `IHost::read` (seed lookup + `ContentConfig`
+fetch + generate) and compares it to the raw generator ceiling — the gap is the
+per-READ store overhead the NFS path also pays (here: none worth mentioning).
 
 To measure *end to end* over a mount instead, you **must** bypass the client page
 cache or you'll just be timing RAM — read with `dd if=<file> of=/dev/null bs=1M
 iflag=direct` (run several in parallel to saturate cores), or use `fio
 --direct=1`.
+
+## Plugins
+
+`prfs-host` `dlopen`s service plugins — every `*.so` next to the binary is
+auto-discovered (except `null.so`), or name them with `--plugin FILE.so`.
+Plugin options are passed generically with `--set KEY=VALUE` (repeatable). Full
+model in [`docs/plugins.md`](docs/plugins.md).
+
+| Plugin | Purpose | Key options / flags |
+|--------|---------|---------------------|
+| `nfsv3` | Full read-write **NFSv3 + MOUNT** server on Asio coroutines — the real front-end | host `--port`, `--time-advance` |
+| `luactl` | **Live Lua console** over a unix socket (`socat READLINE UNIX-CONNECT:…`), `fs` bound to the running store | host `--control PATH` |
+| `bigtree` | Native **store-builder**: a large, reproducible, randomly-shaped tree (heavy-tailed file sizes, snapshots) | `--set bigtree.total/.depth/.dirs/.files/.seed/.snapshots/.force` |
+| `perf` | **Read-performance benchmark**: times the content generator (single/multi-thread) and the store read path vs the ceiling | `--set perf.bytes/.threads/.blocksize/.seed/.size` |
+| `null` | Reference/test front-end (one scripted store op); skipped by the default scan | `--set note=…` |
+
+Build-and-serve a big tree in one process — list `bigtree` first so it populates
+before `nfsv3` starts serving:
+
+```bash
+./build/prfs-host --store /tmp/prfs --clean --port 20490 \
+  --plugin ./build/bigtree.so --plugin ./build/nfsv3.so \
+  --set bigtree.total=1T --set bigtree.seed=42
+```
 
 ## Layout
 
@@ -169,8 +198,19 @@ iflag=direct` (run several in parallel to saturate cores), or use `fio
 | `plugins/bigtree/` | native store-builder (large synthetic tree) |
 | `plugins/perf/` | read-performance benchmark (content generator) |
 | `examples/` | `bigtree.lua` — build a reproducible multi-TiB tree |
-| `docs/` | design, content, di, plugins, todo |
+| `docs/` | design, content, di, plugins, bugs, todo (see below) |
 | `tests/` | mirrors `src/`: contract/differential/invariant/determinism/crash + protocol |
+
+## Documentation
+
+| Doc | What it covers |
+|-----|----------------|
+| [`docs/design.md`](docs/design.md) | Authoritative spec: node/link/snapshot model, versioning, diffs, invariants |
+| [`docs/content.md`](docs/content.md) | The procedural content provider: `ContentConfig`, seed→bytes, sparse/dedup |
+| [`docs/di.md`](docs/di.md) | The DI registry: interfaces, names, provide/resolve, self-registration |
+| [`docs/plugins.md`](docs/plugins.md) | Plugin ABI + host model; the in-tree services (nfsv3, luactl, bigtree, perf) |
+| [`docs/bugs.md`](docs/bugs.md) | The design-bug log (B1–B9) that the `T*` tasks fixed |
+| [`docs/todo.md`](docs/todo.md) | Living task list with status, keyed to `docs/bugs.md` |
 
 ## License
 
