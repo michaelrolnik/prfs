@@ -4,13 +4,16 @@
 //
 //  nfsv4 — an NFSv4.0 front-end as a prfs service plugin (todo L2). NFSv4 folds
 //  MOUNT away (PUTROOTFH replaces it) and batches operations into a single
-//  COMPOUND RPC over the NFS program (100003) version 4. This first increment
-//  implements the browse/read path: the COMPOUND framework with a current- and
-//  saved-filehandle, plus PUTROOTFH/PUTPUBFH/PUTFH/GETFH/SAVEFH/RESTOREFH,
-//  LOOKUP/LOOKUPP, ACCESS, GETATTR (fattr4 attribute bitmaps), READLINK, READ,
-//  READDIR, and the minimal client-state ops a Linux client issues at mount
-//  (SETCLIENTID/SETCLIENTID_CONFIRM/RENEW/OPEN/CLOSE). The write surface and full
-//  lock/share state are follow-ups; unimplemented ops return NFS4ERR_NOTSUPP.
+//  COMPOUND RPC over the NFS program (100003) version 4. Read surface: the
+//  COMPOUND framework with a current- and saved-filehandle, plus PUTROOTFH/
+//  PUTPUBFH/PUTFH/GETFH/SAVEFH/RESTOREFH, LOOKUP/LOOKUPP, ACCESS, GETATTR (fattr4
+//  attribute bitmaps), READLINK, READ, READDIR, and the client-state ops
+//  (SETCLIENTID/SETCLIENTID_CONFIRM/RENEW/CLOSE). Write surface: OPEN with
+//  OPEN4_CREATE, WRITE (fold-into-seed, like nfsv3), SETATTR (decode a client
+//  fattr4), CREATE (dir/symlink/device/fifo/socket), REMOVE, RENAME, LINK,
+//  COMMIT. Mutating ops take the store lock exclusively; a mutation stamps the
+//  parent dir's mtime/ctime. Full share/lock state is a follow-up (a fixed
+//  stateid is returned, not enforced); unimplemented ops → NFS4ERR_NOTSUPP.
 //
 //  Filehandle: the same 16 opaque bytes as nfsv3 = big-endian (nodeID, snapId),
 //  decoded via IPrfs::nodeById(); a snapshot view (snapId != LATEST) is read-only.
@@ -51,8 +54,11 @@ constexpr uint32_t NFSPROC4_NULL = 0, NFSPROC4_COMPOUND = 1;
 enum : uint32_t {
     OP_ACCESS = 3,
     OP_CLOSE = 4,
+    OP_COMMIT = 5,
+    OP_CREATE = 6,
     OP_GETATTR = 9,
     OP_GETFH = 10,
+    OP_LINK = 11,
     OP_LOOKUP = 15,
     OP_LOOKUPP = 16,
     OP_OPEN = 18,
@@ -62,19 +68,41 @@ enum : uint32_t {
     OP_READ = 25,
     OP_READDIR = 26,
     OP_READLINK = 27,
+    OP_REMOVE = 28,
+    OP_RENAME = 29,
     OP_RENEW = 30,
     OP_RESTOREFH = 31,
     OP_SAVEFH = 32,
+    OP_SETATTR = 34,
     OP_SETCLIENTID = 35,
     OP_SETCLIENTID_CONFIRM = 36,
+    OP_WRITE = 38,
 };
+
+//  openflag4 / createhow4 / claim / share and stable_how4.
+constexpr uint32_t OPEN4_NOCREATE = 0, OPEN4_CREATE = 1;
+constexpr uint32_t UNCHECKED4 = 0, GUARDED4 = 1, EXCLUSIVE4 = 2;
+constexpr uint32_t CLAIM_NULL = 0;
+constexpr uint32_t SET_TO_SERVER_TIME4 = 0, SET_TO_CLIENT_TIME4 = 1;
 
 //  nfsstat4 (subset).
 constexpr uint32_t NFS4_OK = 0, NFS4ERR_PERM = 1, NFS4ERR_NOENT = 2, NFS4ERR_IO = 5,
                    NFS4ERR_EXIST = 17, NFS4ERR_NOTDIR = 20, NFS4ERR_ISDIR = 21, NFS4ERR_INVAL = 22,
                    NFS4ERR_ROFS = 30, NFS4ERR_NOTEMPTY = 66, NFS4ERR_STALE = 70,
                    NFS4ERR_BADHANDLE = 10001, NFS4ERR_NOTSUPP = 10004, NFS4ERR_RESOURCE = 10018,
-                   NFS4ERR_NOFILEHANDLE = 10020, NFS4ERR_OP_ILLEGAL = 10044;
+                   NFS4ERR_NOFILEHANDLE = 10020, NFS4ERR_ATTRNOTSUPP = 10032,
+                   NFS4ERR_OP_ILLEGAL = 10044;
+
+//  attribute-fold for WRITE: a write stores no bytes — it evolves the file's
+//  content seed (FNV-1a over seed, offset, data), so READ regenerates content
+//  reflecting the write while the store grows by nothing. Never returns 0.
+uint64_t mixSeed(uint64_t seed, uint64_t off, std::string const& data) {
+    uint64_t h = seed ^ (off + 0x9E3779B97F4A7C15ull);
+    for (unsigned char c : data) {
+        h = (h ^ c) * 0x100000001B3ull;
+    }
+    return h ? h : 1;
+}
 
 //  nfs_ftype4.
 constexpr uint32_t NF4REG = 1, NF4DIR = 2, NF4BLK = 3, NF4CHR = 4, NF4LNK = 5, NF4SOCK = 6,
@@ -638,9 +666,32 @@ private:
 
     //  Dispatch one operation; writes "opnum, status[, resok]" into `rw` and
     //  returns the status (so COMPOUND can stop the chain on error).
+    static bool isMutating(uint32_t op) {
+        switch (op) {
+        case OP_OPEN: // may create
+        case OP_WRITE:
+        case OP_SETATTR:
+        case OP_CREATE:
+        case OP_REMOVE:
+        case OP_RENAME:
+        case OP_LINK:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     uint32_t doOp(uint32_t op, Reader& r, Writer& rw) {
         IPrfs& fs = m_host.fs();
-        std::shared_lock<std::shared_mutex> lk(m_host.storeMutex());
+        //  Reads run under a shared lock (content generation parallelizes);
+        //  mutations take it exclusively.
+        std::shared_lock<std::shared_mutex> rl;
+        std::unique_lock<std::shared_mutex> wl;
+        if (isMutating(op)) {
+            wl = std::unique_lock<std::shared_mutex>(m_host.storeMutex());
+        } else {
+            rl = std::shared_lock<std::shared_mutex>(m_host.storeMutex());
+        }
         rw.u32(op);
         switch (op) {
         case OP_PUTROOTFH: {
@@ -733,10 +784,116 @@ private:
             rw.u32(NFS4_OK);
             return NFS4_OK;
         }
+        case OP_WRITE:
+            return opWrite(r, rw);
+        case OP_SETATTR:
+            return opSetattr(r, rw);
+        case OP_CREATE:
+            return opCreate(r, rw);
+        case OP_REMOVE:
+            return opRemove(r, rw);
+        case OP_RENAME:
+            return opRename(r, rw);
+        case OP_LINK:
+            return opLink(r, rw);
+        case OP_COMMIT: {
+            r.u64(); // offset
+            r.u32(); // count
+            rw.u32(NFS4_OK);
+            for (int i = 0; i < 8; ++i) {
+                rw.v.push_back(0); // writeverf4 (nothing is buffered)
+            }
+            return NFS4_OK;
+        }
         default:
             rw.u32(NFS4ERR_NOTSUPP);
             return NFS4ERR_NOTSUPP;
         }
+    }
+
+    //  change_info4 { bool atomic; changeid4 before; changeid4 after; } — the
+    //  dir's change id (its ctime) straddling the mutation.
+    void changeInfo(Writer& rw, uint64_t before, uint64_t after) {
+        rw.u32(1);
+        rw.u64(before);
+        rw.u64(after);
+    }
+
+    //  A namespace mutation stamps the parent dir's mtime/ctime = now() (POSIX;
+    //  the store leaves this to the caller — see nfsv3). Returns the change id
+    //  (ctime) before the stamp, for change_info4.
+    uint64_t touchDir(Node const& dir) {
+        uint64_t before = dir->ctime();
+        uint64_t t = m_host.fs().now();
+        dir->mtime(t);
+        dir->ctime(t);
+        return before;
+    }
+
+    //  Decode a client fattr4 { bitmap4; opaque vals<> } and apply the settable
+    //  attributes to `n`, consuming the bytes in bit order. NFS4ERR_ATTRNOTSUPP
+    //  if a set attribute isn't one we can apply (we can't skip an unknown one).
+    uint32_t applyFattr4(Reader& r, Node const& n) {
+        std::vector<uint32_t> bm = r.bitmap();
+        r.u32(); // attrlist length (we decode attr-by-attr instead)
+        for (uint32_t b = 0; b < bm.size() * 32; ++b) {
+            if (!(bm[b / 32] & (1u << (b % 32)))) {
+                continue;
+            }
+            switch (b) {
+            case FA_SIZE: {
+                uint64_t s = r.u64();
+                if (n) {
+                    n->size(s);
+                }
+                break;
+            }
+            case FA_MODE: {
+                uint32_t m = r.u32();
+                if (n) {
+                    n->mode(m & 0xFFF);
+                }
+                break;
+            }
+            case FA_OWNER: {
+                std::string o = r.str();
+                if (n) {
+                    n->uid(uint32_t(std::strtoul(o.c_str(), nullptr, 10)));
+                }
+                break;
+            }
+            case FA_OWNER_GROUP: {
+                std::string g = r.str();
+                if (n) {
+                    n->gid(uint32_t(std::strtoul(g.c_str(), nullptr, 10)));
+                }
+                break;
+            }
+            case 48:   // FATTR4_TIME_ACCESS_SET (settime4)
+            case 54: { // FATTR4_TIME_MODIFY_SET
+                uint32_t how = r.u32();
+                uint64_t sec = m_host.fs().now();
+                uint32_t nsec = 0;
+                if (how == SET_TO_CLIENT_TIME4) {
+                    sec = r.u64();
+                    nsec = r.u32();
+                }
+                if (n) {
+                    if (b == 48) {
+                        n->atime(sec);
+                        n->atimeNsec(nsec);
+                    } else {
+                        n->mtime(sec);
+                        n->mtimeNsec(nsec);
+                    }
+                }
+                break;
+            }
+            default:
+                return NFS4ERR_ATTRNOTSUPP; // unknown settable attr: can't skip it
+            }
+        }
+        return r.ok ? NFS4_OK : NFS4ERR_INVAL;
     }
 
     Node cur(IPrfs& fs) {
@@ -900,8 +1057,8 @@ private:
         return NFS4_OK;
     }
 
-    //  OPEN (CLAIM_NULL, no-create only) — enough for a client to open a file for
-    //  reading. Returns a fixed stateid; share/lock state is not enforced.
+    //  OPEN (CLAIM_NULL): opens a file for reading, or creates a regular file
+    //  (OPEN4_CREATE). Returns a fixed stateid; share/lock state is not enforced.
     uint32_t opOpen(Reader& r, Writer& rw) {
         IPrfs& fs = m_host.fs();
         r.u32();                     // seqid
@@ -909,15 +1066,147 @@ private:
         r.u32();                     // share_deny
         r.u64();                     // open_owner.clientid
         r.skipOpaque();              // open_owner.owner<>
-        uint32_t opentype = r.u32(); // OPEN4_NOCREATE(0) / OPEN4_CREATE(1)
-        if (opentype != 0) {
-            rw.u32(NFS4ERR_NOTSUPP); // create surface is a follow-up
-            return NFS4ERR_NOTSUPP;
+        uint32_t opentype = r.u32(); // openflag4.opentype
+        uint32_t createmode = 0;
+        bool haveAttrs = false;
+        Reader attrsAt{}; // position of createattrs, decoded after the file exists
+        if (opentype == OPEN4_CREATE) {
+            createmode = r.u32();
+            if (createmode == EXCLUSIVE4) {
+                r.skip(8); // createverf4
+            } else {
+                attrsAt = r; // createattrs fattr4 follows here
+                haveAttrs = true;
+                r.bitmap();                          // consume the fattr4 to reach the claim
+                r.skip((r.u32() + 3u) & ~size_t(3)); // attrlist<>
+            }
         }
-        uint32_t claim = r.u32(); // CLAIM_NULL(0)
-        if (claim != 0) {
+        uint32_t claim = r.u32();
+        if (claim != CLAIM_NULL) {
             rw.u32(NFS4ERR_NOTSUPP);
             return NFS4ERR_NOTSUPP;
+        }
+        std::string name = r.str();
+        if (!r.ok) {
+            rw.u32(NFS4ERR_INVAL);
+            return NFS4ERR_INVAL;
+        }
+        Node dir = cur(fs);
+        if (!dir || dir->type() != Type::DIR) {
+            rw.u32(NFS4ERR_NOTDIR);
+            return NFS4ERR_NOTDIR;
+        }
+        if (opentype == OPEN4_CREATE && !live(t_fh.cfh.second)) {
+            rw.u32(NFS4ERR_ROFS);
+            return NFS4ERR_ROFS;
+        }
+        uint64_t before = dir->ctime();
+        Node child = fs.lookup(dir, name);
+        bool created = false;
+        if (!child) {
+            if (opentype != OPEN4_CREATE) {
+                rw.u32(NFS4ERR_NOENT);
+                return NFS4ERR_NOENT;
+            }
+            child = fs.mkfile("");
+            if (fs.link(dir, name, child) != Error::OK) {
+                rw.u32(NFS4ERR_IO);
+                return NFS4ERR_IO;
+            }
+            if (haveAttrs) {
+                applyFattr4(attrsAt, child); // mode/size/owner from createattrs
+            }
+            touchDir(dir);
+            created = true;
+        } else if (opentype == OPEN4_CREATE && createmode == GUARDED4) {
+            rw.u32(NFS4ERR_EXIST);
+            return NFS4ERR_EXIST;
+        }
+        t_fh.cfh = {child->id(), child->snap()};
+        t_fh.hasCfh = true;
+        rw.u32(NFS4_OK);
+        emitStateid(rw);                                         // OPEN4resok.stateid
+        changeInfo(rw, before, created ? dir->ctime() : before); // cinfo
+        rw.u32(0);                                               // rflags
+        rw.u32(2);                                               // attrset bitmap (empty)
+        rw.u32(0);
+        rw.u32(0);
+        rw.u32(0); // delegation type = OPEN_DELEGATE_NONE
+        return NFS4_OK;
+    }
+
+    //  WRITE — stores no bytes: folds the data into the file's content seed and
+    //  grows the size, so READ regenerates content reflecting the write.
+    uint32_t opWrite(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        r.skip(16); // stateid
+        uint64_t off = r.u64();
+        r.u32(); // stable_how4
+        std::string data = r.str();
+        Node n = cur(fs);
+        if (!n) {
+            rw.u32(NFS4ERR_NOFILEHANDLE);
+            return NFS4ERR_NOFILEHANDLE;
+        }
+        if (!live(t_fh.cfh.second)) {
+            rw.u32(NFS4ERR_ROFS);
+            return NFS4ERR_ROFS;
+        }
+        if (n->type() == Type::DIR) {
+            rw.u32(NFS4ERR_ISDIR);
+            return NFS4ERR_ISDIR;
+        }
+        fs.setContentSeed(n, mixSeed(n->contentSeed(), off, data));
+        if (off + data.size() > n->size()) {
+            n->size(off + data.size());
+        }
+        n->mtime(fs.now());
+        rw.u32(NFS4_OK);
+        rw.u32(uint32_t(data.size())); // count
+        rw.u32(2);                     // committed = FILE_SYNC4
+        for (int i = 0; i < 8; ++i) {
+            rw.v.push_back(0); // writeverf4
+        }
+        return NFS4_OK;
+    }
+
+    uint32_t opSetattr(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        r.skip(16); // stateid
+        Node n = cur(fs);
+        if (!n) {
+            rw.u32(NFS4ERR_NOFILEHANDLE);
+            return NFS4ERR_NOFILEHANDLE;
+        }
+        if (!live(t_fh.cfh.second)) {
+            r.bitmap();
+            r.skip((r.u32() + 3u) & ~size_t(3));
+            rw.u32(NFS4ERR_ROFS);
+            rw.u32(0); // attrsset bitmap (empty)
+            return NFS4ERR_ROFS;
+        }
+        uint32_t st = applyFattr4(r, n);
+        if (st == NFS4_OK) {
+            n->ctime(fs.now()); // any attr change bumps ctime
+        }
+        rw.u32(st);
+        rw.u32(0); // attrsset bitmap we set (empty is accepted)
+        return st;
+    }
+
+    //  CREATE — non-regular objects (dir, symlink, device, fifo, socket); a
+    //  regular file is created via OPEN. createtype4 switches on the ftype.
+    uint32_t opCreate(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        uint32_t type = r.u32(); // nfs_ftype4
+        Node child;
+        std::string linkdata;
+        uint32_t maj = 0, min = 0;
+        if (type == NF4LNK) {
+            linkdata = r.str();
+        } else if (type == NF4BLK || type == NF4CHR) {
+            maj = r.u32();
+            min = r.u32();
         }
         std::string name = r.str();
         Node dir = cur(fs);
@@ -925,23 +1214,141 @@ private:
             rw.u32(NFS4ERR_NOTDIR);
             return NFS4ERR_NOTDIR;
         }
-        Node child = fs.lookup(dir, name);
-        if (!child) {
-            rw.u32(NFS4ERR_NOENT);
-            return NFS4ERR_NOENT;
+        if (!live(t_fh.cfh.second)) {
+            r.bitmap();
+            r.skip((r.u32() + 3u) & ~size_t(3));
+            rw.u32(NFS4ERR_ROFS);
+            return NFS4ERR_ROFS;
         }
+        switch (type) {
+        case NF4DIR:
+            child = fs.mkdir();
+            break;
+        case NF4LNK:
+            child = fs.symlink(linkdata);
+            break;
+        case NF4BLK:
+            child = fs.mknod(Type::BLK, maj, min);
+            break;
+        case NF4CHR:
+            child = fs.mknod(Type::CHR, maj, min);
+            break;
+        case NF4SOCK:
+            child = fs.mksock();
+            break;
+        case NF4FIFO:
+            child = fs.mkfifo();
+            break;
+        default:
+            rw.u32(NFS4ERR_INVAL);
+            return NFS4ERR_INVAL;
+        }
+        uint64_t before = dir->ctime();
+        if (fs.link(dir, name, child) != Error::OK) {
+            rw.u32(NFS4ERR_EXIST);
+            return NFS4ERR_EXIST;
+        }
+        uint32_t ast = applyFattr4(r, child); // createattrs
+        touchDir(dir);
         t_fh.cfh = {child->id(), child->snap()};
         t_fh.hasCfh = true;
         rw.u32(NFS4_OK);
-        emitStateid(rw); // OPEN4resok.stateid
-        rw.u32(0);       // change_info4.atomic = false
-        rw.u64(0);       // .before
-        rw.u64(0);       // .after
-        rw.u32(0);       // rflags
-        rw.u32(2);       // attrset bitmap: two zero words
+        changeInfo(rw, before, dir->ctime());
+        rw.u32(2); // attrset bitmap
         rw.u32(0);
         rw.u32(0);
-        rw.u32(0); // delegation type = OPEN_DELEGATE_NONE
+        return ast == NFS4_OK ? NFS4_OK : NFS4_OK; // attrs best-effort
+    }
+
+    uint32_t opRemove(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        std::string name = r.str();
+        Node dir = cur(fs);
+        if (!dir || dir->type() != Type::DIR) {
+            rw.u32(NFS4ERR_NOTDIR);
+            return NFS4ERR_NOTDIR;
+        }
+        if (!live(t_fh.cfh.second)) {
+            rw.u32(NFS4ERR_ROFS);
+            return NFS4ERR_ROFS;
+        }
+        Node victim = fs.lookup(dir, name);
+        if (victim && victim->type() == Type::DIR && !fs.readdir(victim).empty()) {
+            rw.u32(NFS4ERR_NOTEMPTY);
+            return NFS4ERR_NOTEMPTY;
+        }
+        uint64_t before = dir->ctime();
+        Error e = fs.unlink(dir, name);
+        if (e != Error::OK) {
+            rw.u32(toNfs4(e));
+            return toNfs4(e);
+        }
+        touchDir(dir);
+        rw.u32(NFS4_OK);
+        changeInfo(rw, before, dir->ctime());
+        return NFS4_OK;
+    }
+
+    //  RENAME — source dir is the SAVED fh, target dir the CURRENT fh.
+    uint32_t opRename(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        std::string oldname = r.str();
+        std::string newname = r.str();
+        if (!t_fh.hasSfh || !t_fh.hasCfh) {
+            rw.u32(NFS4ERR_NOFILEHANDLE);
+            return NFS4ERR_NOFILEHANDLE;
+        }
+        Node sdir = fs.nodeById(t_fh.sfh.first, t_fh.sfh.second);
+        Node ddir = fs.nodeById(t_fh.cfh.first, t_fh.cfh.second);
+        if (!sdir || !ddir) {
+            rw.u32(NFS4ERR_STALE);
+            return NFS4ERR_STALE;
+        }
+        if (!live(t_fh.sfh.second) || !live(t_fh.cfh.second)) {
+            rw.u32(NFS4ERR_ROFS);
+            return NFS4ERR_ROFS;
+        }
+        uint64_t sbefore = sdir->ctime(), dbefore = ddir->ctime();
+        Error e = fs.move(sdir, oldname, ddir, newname);
+        if (e != Error::OK) {
+            rw.u32(toNfs4(e));
+            return toNfs4(e);
+        }
+        touchDir(sdir);
+        touchDir(ddir);
+        rw.u32(NFS4_OK);
+        changeInfo(rw, sbefore, sdir->ctime()); // source_cinfo
+        changeInfo(rw, dbefore, ddir->ctime()); // target_cinfo
+        return NFS4_OK;
+    }
+
+    //  LINK — hard-link the SAVED-fh file into the CURRENT-fh dir under newname.
+    uint32_t opLink(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        std::string newname = r.str();
+        if (!t_fh.hasSfh || !t_fh.hasCfh) {
+            rw.u32(NFS4ERR_NOFILEHANDLE);
+            return NFS4ERR_NOFILEHANDLE;
+        }
+        Node file = fs.nodeById(t_fh.sfh.first, t_fh.sfh.second);
+        Node dir = fs.nodeById(t_fh.cfh.first, t_fh.cfh.second);
+        if (!file || !dir || dir->type() != Type::DIR) {
+            rw.u32(NFS4ERR_NOTDIR);
+            return NFS4ERR_NOTDIR;
+        }
+        if (!live(t_fh.cfh.second)) {
+            rw.u32(NFS4ERR_ROFS);
+            return NFS4ERR_ROFS;
+        }
+        uint64_t before = dir->ctime();
+        Error e = fs.link(dir, newname, file);
+        if (e != Error::OK) {
+            rw.u32(toNfs4(e));
+            return toNfs4(e);
+        }
+        touchDir(dir);
+        rw.u32(NFS4_OK);
+        changeInfo(rw, before, dir->ctime());
         return NFS4_OK;
     }
 

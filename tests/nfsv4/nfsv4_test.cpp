@@ -205,3 +205,125 @@ TEST(NfsV4, CompoundBrowseRead) {
     ::close(fd);
     loader.stopAll();
 }
+
+TEST(NfsV4, WriteSurface) {
+    const int port = 34581;
+
+    auto fs = makeMemStore();
+    auto root = fs->rwRoot();
+
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV4_PLUGIN_SO));
+    loader.startServices();
+
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    auto compound = [&](std::vector<uint8_t> ops, uint32_t nops) {
+        std::vector<uint8_t> c;
+        put32(c, 0); // tag ""
+        put32(c, 0); // minorversion
+        put32(c, nops);
+        c.insert(c.end(), ops.begin(), ops.end());
+        return rpc(fd, 1, c);
+    };
+    auto stateid = [](std::vector<uint8_t>& v) {
+        for (int i = 0; i < 4; ++i) {
+            put32(v, 0);
+        }
+    };
+
+    //  COMPOUND { PUTROOTFH, OPEN(create "new.txt" mode 0644), WRITE "hello", CLOSE }.
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24); // PUTROOTFH
+        put32(ops, 18); // OPEN
+        put32(ops, 0);  // seqid
+        put32(ops, 2);  // share_access WRITE
+        put32(ops, 0);  // share_deny NONE
+        putU64(ops, 0); // owner.clientid
+        putStr(ops, "ownr");
+        put32(ops, 1); // opentype OPEN4_CREATE
+        put32(ops, 0); // createmode UNCHECKED4
+        put32(ops, 2); // createattrs bitmap: two words
+        put32(ops, 0);
+        put32(ops, (1u << (33 - 32))); // FATTR4_MODE
+        put32(ops, 4);                 // attrlist length
+        put32(ops, 0644);              // mode
+        put32(ops, 0);                 // claim CLAIM_NULL
+        putStr(ops, "new.txt");
+        put32(ops, 38); // WRITE
+        stateid(ops);
+        putU64(ops, 0); // offset
+        put32(ops, 2);  // stable FILE_SYNC4
+        putStr(ops, "hello");
+        put32(ops, 4); // CLOSE
+        put32(ops, 0); // seqid
+        stateid(ops);
+        Reply r = compound(ops, 4);
+        ASSERT_EQ(r.astat, 0u);
+        EXPECT_EQ(get32(&r.body[0]), 0u); // COMPOUND status OK
+    }
+    {
+        Node f = fs->lookup(root, "new.txt");
+        ASSERT_TRUE(f);
+        EXPECT_EQ(f->type(), Type::REG);
+        EXPECT_EQ(f->size(), 5u); // "hello" grew the size to 5
+    }
+
+    //  COMPOUND { PUTROOTFH, CREATE(NF4DIR "mydir") }.
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24); // PUTROOTFH
+        put32(ops, 6);  // CREATE
+        put32(ops, 2);  // createtype NF4DIR (no typedata)
+        putStr(ops, "mydir");
+        put32(ops, 0); // createattrs: empty bitmap
+        put32(ops, 0); // attrlist length 0
+        Reply r = compound(ops, 2);
+        ASSERT_EQ(r.astat, 0u);
+        EXPECT_EQ(get32(&r.body[0]), 0u);
+    }
+    {
+        Node d = fs->lookup(root, "mydir");
+        ASSERT_TRUE(d);
+        EXPECT_EQ(d->type(), Type::DIR);
+    }
+
+    //  COMPOUND { PUTROOTFH, LOOKUP "new.txt", SETATTR mode 0600 }.
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24); // PUTROOTFH
+        put32(ops, 15); // LOOKUP
+        putStr(ops, "new.txt");
+        put32(ops, 34); // SETATTR
+        stateid(ops);
+        put32(ops, 2); // bitmap two words
+        put32(ops, 0);
+        put32(ops, (1u << (33 - 32))); // MODE
+        put32(ops, 4);                 // attrlist length
+        put32(ops, 0600);
+        Reply r = compound(ops, 3);
+        ASSERT_EQ(r.astat, 0u);
+        EXPECT_EQ(get32(&r.body[0]), 0u);
+    }
+    EXPECT_EQ(fs->lookup(root, "new.txt")->mode() & 0777, 0600u);
+
+    //  COMPOUND { PUTROOTFH, REMOVE "new.txt" }.
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24); // PUTROOTFH
+        put32(ops, 28); // REMOVE
+        putStr(ops, "new.txt");
+        Reply r = compound(ops, 2);
+        ASSERT_EQ(r.astat, 0u);
+        EXPECT_EQ(get32(&r.body[0]), 0u);
+    }
+    EXPECT_FALSE(fs->lookup(root, "new.txt"));
+
+    ::close(fd);
+    loader.stopAll();
+}

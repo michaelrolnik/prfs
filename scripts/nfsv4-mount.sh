@@ -95,7 +95,22 @@ else
     echo "   (no regular file found)"
 fi
 
+echo "==> write surface: mkdir, create, write, rename, hardlink, remove"
+(
+    set -x
+    mkdir "$MNT/wtest"
+    echo "hello nfsv4" >"$MNT/wtest/a.txt"
+    ls -l "$MNT/wtest/a.txt"
+    mv "$MNT/wtest/a.txt" "$MNT/wtest/b.txt"
+    ln "$MNT/wtest/b.txt" "$MNT/wtest/c.txt"
+    ln -s b.txt "$MNT/wtest/link"
+    ls -la "$MNT/wtest"
+    rm -f "$MNT/wtest/c.txt" "$MNT/wtest/link"
+    rm -f "$MNT/wtest/b.txt"
+    rmdir "$MNT/wtest"
+) 2>&1 | sed 's/^/   /'
 echo
+
 echo "==> server COMPOUND trace (last 40 lines of $HOST_LOG):"
 grep -a "nfsv4:" "$HOST_LOG" | tail -40
 echo
