@@ -111,6 +111,33 @@ echo "==> write surface: mkdir, create, write, rename, hardlink, remove"
 ) 2>&1 | sed 's/^/   /'
 echo
 
+echo "==> byte-range lock over the mount (fcntl F_SETLK ⇒ NFSv4 LOCK)"
+if command -v python3 >/dev/null; then
+    LK="$MNT/lockme"
+    echo "content" >"$LK"
+    LOCKER='
+import fcntl,sys,time
+f=open(sys.argv[1],"r+")
+try:
+    fcntl.lockf(f, fcntl.LOCK_EX|fcntl.LOCK_NB, int(sys.argv[3]), int(sys.argv[2]), 0)
+    print("   [%s] LOCK [%s,%s) acquired" % (sys.argv[4], sys.argv[2], int(sys.argv[2])+int(sys.argv[3])))
+    time.sleep(float(sys.argv[5]))
+    print("   [%s] released" % sys.argv[4])
+except OSError as e:
+    print("   [%s] LOCK denied: %s" % (sys.argv[4], e)); sys.exit(1)
+'
+    python3 -c "$LOCKER" "$LK" 0 10 holder 3 &
+    HOLD=$!
+    sleep 1
+    python3 -c "$LOCKER" "$LK" 5 10 contender 0 ||
+        echo "   (contender could not take the overlapping lock)"
+    wait "$HOLD"
+    rm -f "$LK"
+else
+    echo "   (python3 not found — skipping lock test)"
+fi
+echo
+
 echo "==> server COMPOUND trace (last 40 lines of $HOST_LOG):"
 grep -a "nfsv4:" "$HOST_LOG" | tail -40
 echo
