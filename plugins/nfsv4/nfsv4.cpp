@@ -39,7 +39,9 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -89,6 +91,7 @@ enum : uint32_t {
     OP_SETCLIENTID = 35,
     OP_SETCLIENTID_CONFIRM = 36,
     OP_WRITE = 38,
+    OP_RELEASE_LOCKOWNER = 39,
 };
 
 //  openflag4 / createhow4 / claim / share and stable_how4.
@@ -101,14 +104,16 @@ constexpr uint32_t SET_TO_SERVER_TIME4 = 0, SET_TO_CLIENT_TIME4 = 1;
 constexpr uint32_t ACCESS_READ = 1, ACCESS_WRITE = 2, ACCESS_BOTH = 3;
 constexpr uint32_t DENY_NONE = 0, DENY_READ = 1, DENY_WRITE = 2, DENY_BOTH = 3;
 constexpr uint32_t READ_LT = 1, WRITE_LT = 2, READW_LT = 3, WRITEW_LT = 4;
-constexpr uint32_t OPEN4_RESULT_CONFIRM = 2;
+constexpr uint32_t OPEN4_RESULT_CONFIRM = 2, OPEN4_RESULT_LOCKTYPE_POSIX = 4;
 
 //  nfsstat4 (subset).
 constexpr uint32_t NFS4_OK = 0, NFS4ERR_PERM = 1, NFS4ERR_NOENT = 2, NFS4ERR_IO = 5,
                    NFS4ERR_EXIST = 17, NFS4ERR_NOTDIR = 20, NFS4ERR_ISDIR = 21, NFS4ERR_INVAL = 22,
                    NFS4ERR_ROFS = 30, NFS4ERR_NOTEMPTY = 66, NFS4ERR_STALE = 70,
                    NFS4ERR_BADHANDLE = 10001, NFS4ERR_BAD_COOKIE = 10003, NFS4ERR_NOTSUPP = 10004,
-                   NFS4ERR_DENIED = 10010, NFS4ERR_SHARE_DENIED = 10015, NFS4ERR_RESOURCE = 10018,
+                   NFS4ERR_EXPIRED = 10011, NFS4ERR_CLID_INUSE = 10017,
+                   NFS4ERR_STALE_CLIENTID = 10022, NFS4ERR_DENIED = 10010,
+                   NFS4ERR_SHARE_DENIED = 10015, NFS4ERR_RESOURCE = 10018,
                    NFS4ERR_NOFILEHANDLE = 10020, NFS4ERR_BAD_STATEID = 10025,
                    NFS4ERR_LOCK_RANGE = 10028, NFS4ERR_ATTRNOTSUPP = 10032,
                    NFS4ERR_OPENMODE = 10038, NFS4ERR_OP_ILLEGAL = 10044;
@@ -558,6 +563,23 @@ struct OpenState {
     uint32_t seqid = 1;
 };
 
+//  A client's lease record (SETCLIENTID/SETCLIENTID_CONFIRM). NFSv4.0 opens and
+//  locks are anchored to a *confirmed* clientid; a stale one (e.g. cached across
+//  a server restart) must be rejected so the client re-runs the handshake — that
+//  rejection is what makes real-client byte-range locking work. The callback
+//  fields are recorded but unused: we grant no delegations, so no CB_ channel is
+//  needed. Leases never expire here (deterministic target, no wall clock).
+struct ClientRec {
+    uint64_t clientid = 0;    // server-assigned handle
+    std::string id;           // nfs_client_id4.id (stable per client instance)
+    uint64_t verifier = 0;    // client boot verifier (changes ⇒ client rebooted)
+    uint64_t confirmVerf = 0; // server-minted; echoed back by SETCLIENTID_CONFIRM
+    bool confirmed = false;
+    uint32_t cbProgram = 0; // callback program/addr — recorded, not dialed
+    std::string cbNetid, cbAddr;
+    uint32_t cbIdent = 0;
+};
+
 struct LockRange {
     uint64_t off = 0, len = 0; // len == ~0 ⇒ to EOF
     uint32_t type = 0;         // READ_LT / WRITE_LT
@@ -856,19 +878,12 @@ private:
             return opLockt(r, rw);
         case OP_LOCKU:
             return opLocku(r, rw);
-        case OP_RENEW: {
-            r.u64(); // clientid
-            rw.u32(NFS4_OK);
-            return NFS4_OK;
-        }
+        case OP_RENEW:
+            return opRenew(r, rw);
         case OP_SETCLIENTID:
             return opSetClientid(r, rw);
-        case OP_SETCLIENTID_CONFIRM: {
-            r.u64();   // clientid
-            r.skip(8); // setclientid_confirm verifier
-            rw.u32(NFS4_OK);
-            return NFS4_OK;
-        }
+        case OP_SETCLIENTID_CONFIRM:
+            return opSetClientidConfirm(r, rw);
         case OP_WRITE:
             return opWrite(r, rw);
         case OP_SETATTR:
@@ -890,6 +905,8 @@ private:
             }
             return NFS4_OK;
         }
+        case OP_RELEASE_LOCKOWNER:
+            return opReleaseLockowner(r, rw);
         default:
             rw.u32(NFS4ERR_NOTSUPP);
             return NFS4ERR_NOTSUPP;
@@ -1264,6 +1281,10 @@ private:
         uint32_t deny = r.u32();     // share_deny
         uint64_t clientid = r.u64(); // open_owner.clientid
         std::string owner = r.str(); // open_owner.owner<>
+        if (!clientConfirmed(clientid)) {
+            rw.u32(NFS4ERR_STALE_CLIENTID); // force SETCLIENTID/CONFIRM before state
+            return NFS4ERR_STALE_CLIENTID;
+        }
         uint32_t opentype = r.u32(); // openflag4.opentype
         uint32_t createmode = 0;
         bool haveAttrs = false;
@@ -1327,6 +1348,7 @@ private:
         uint64_t fileId = child->id();
         uint32_t stSeqid;
         uint64_t stId;
+        bool needConfirm;
         {
             std::lock_guard<std::mutex> sl(m_stateMu);
             uint64_t upId = 0;
@@ -1353,11 +1375,18 @@ private:
                 m_opens[stId] = OpenState{clientid, owner, fileId, access, deny, 1};
                 stSeqid = 1;
             }
+            //  A brand-new open-owner must be confirmed (OPEN_CONFIRM) before it can
+            //  hold locks. Without OPEN4_RESULT_CONFIRM the Linux client never marks
+            //  the owner usable ⇒ fcntl short-circuits to ENOLCK. (knfsd does this.)
+            needConfirm = m_confirmedOwners.find({clientid, owner}) == m_confirmedOwners.end();
         }
+        //  LOCKTYPE_POSIX advertises POSIX byte-range semantics; CONFIRM requests the
+        //  open-owner handshake for a not-yet-confirmed owner.
+        uint32_t rflags = OPEN4_RESULT_LOCKTYPE_POSIX | (needConfirm ? OPEN4_RESULT_CONFIRM : 0);
         rw.u32(NFS4_OK);
         writeStateid(rw, stSeqid, stId, 0);                      // OPEN4resok.stateid
         changeInfo(rw, before, created ? dir->ctime() : before); // cinfo
-        rw.u32(0);                                               // rflags (no CONFIRM required)
+        rw.u32(rflags);                                          // rflags
         rw.u32(2);                                               // attrset bitmap (empty)
         rw.u32(0);
         rw.u32(0);
@@ -1390,6 +1419,9 @@ private:
         auto it = m_opens.find(sid.id);
         if (it != m_opens.end()) {
             sq = ++it->second.seqid;
+            //  The open-owner is now confirmed — future opens by it skip CONFIRM,
+            //  and it can hold locks.
+            m_confirmedOwners.insert({it->second.clientid, it->second.owner});
         }
         rw.u32(NFS4_OK);
         writeStateid(rw, sq, sid.id, sid.tag);
@@ -1432,6 +1464,10 @@ private:
             r.u32();        // lock_seqid
             clientid = r.u64();
             owner = r.str();
+            if (!clientConfirmed(clientid)) {
+                rw.u32(NFS4ERR_STALE_CLIENTID);
+                return NFS4ERR_STALE_CLIENTID;
+            }
         } else {
             existing = readStateid(r); // lock_stateid
             r.u32();                   // lock_seqid
@@ -1535,6 +1571,21 @@ private:
             ranges.end());
         rw.u32(NFS4_OK);
         writeStateid(rw, ++it->second.seqid, sid.id, 1);
+        return NFS4_OK;
+    }
+
+    //  RELEASE_LOCKOWNER — the client is done with a lock-owner (sent after LOCKU).
+    //  Forget its lock state. The Linux client issues this to tidy up; replying OK
+    //  (rather than NOTSUPP) completes the lock lifecycle cleanly.
+    uint32_t opReleaseLockowner(Reader& r, Writer& rw) {
+        uint64_t clientid = r.u64(); // lock_owner.clientid
+        std::string owner = r.str(); // lock_owner.owner<>
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        for (auto it = m_locks.begin(); it != m_locks.end();) {
+            it = (it->second.clientid == clientid && it->second.owner == owner) ? m_locks.erase(it)
+                                                                                : std::next(it);
+        }
+        rw.u32(NFS4_OK);
         return NFS4_OK;
     }
 
@@ -1768,18 +1819,118 @@ private:
         return NFS4_OK;
     }
 
-    uint32_t opSetClientid(Reader& r, Writer& rw) {
-        r.skip(8);      // client.verifier
-        r.skipOpaque(); // client.id<>
-        r.u32();        // cb_program
-        r.skipOpaque(); // cb_location.r_netid
-        r.skipOpaque(); // cb_location.r_addr
-        r.u32();        // callback_ident
-        rw.u32(NFS4_OK);
-        rw.u64(++m_clientid); // SETCLIENTID4resok.clientid
-        for (int i = 0; i < 8; ++i) {
-            rw.v.push_back(0); // setclientid_confirm verifier
+    //  Is `clientid` a confirmed lease this server boot? OPEN/LOCK require it; a
+    //  stale (unconfirmed) clientid ⇒ NFS4ERR_STALE_CLIENTID, forcing the client
+    //  to (re)run SETCLIENTID/CONFIRM before it can hold state.
+    bool clientConfirmed(uint64_t clientid) {
+        std::lock_guard<std::mutex> lk(m_clientMu);
+        auto it = m_clients.find(clientid);
+        return it != m_clients.end() && it->second.confirmed;
+    }
+
+    //  Drop all open/lock state owned by `clientid` (client reboot / lease loss).
+    void purgeClientState(uint64_t clientid) {
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        for (auto it = m_opens.begin(); it != m_opens.end();) {
+            it = it->second.clientid == clientid ? m_opens.erase(it) : std::next(it);
         }
+        for (auto it = m_locks.begin(); it != m_locks.end();) {
+            it = it->second.clientid == clientid ? m_locks.erase(it) : std::next(it);
+        }
+    }
+
+    //  SETCLIENTID (RFC 7530 §16.33): register a client instance and hand back a
+    //  clientid plus a confirm verifier the client must echo in _CONFIRM. Idempotent
+    //  on (id, verifier): a repeat returns the *same* clientid (RFC 7530 §9.1.1 case
+    //  "update") rather than churning a fresh one — otherwise the client re-confirms
+    //  endlessly and its just-confirmed lease gets purged as "stale".
+    uint32_t opSetClientid(Reader& r, Writer& rw) {
+        uint64_t verifier = r.u64(); // client.verifier
+        std::string id = r.str();    // client.id<>
+        uint32_t cbProgram = r.u32();
+        std::string cbNetid = r.str(); // cb_location.r_netid
+        std::string cbAddr = r.str();  // cb_location.r_addr
+        uint32_t cbIdent = r.u32();    // callback_ident
+        if (!r.ok) {
+            rw.u32(NFS4ERR_INVAL);
+            return NFS4ERR_INVAL;
+        }
+        std::lock_guard<std::mutex> lk(m_clientMu);
+        uint64_t clientid = 0;
+        for (auto const& [k, c] : m_clients) {
+            if (c.id == id && c.verifier == verifier) { // same instance ⇒ reuse
+                clientid = k;
+                break;
+            }
+        }
+        uint64_t cv;
+        if (clientid) {
+            ClientRec& rec = m_clients[clientid]; // refresh callback, keep confirm state
+            rec.cbProgram = cbProgram;
+            rec.cbNetid = cbNetid;
+            rec.cbAddr = cbAddr;
+            rec.cbIdent = cbIdent;
+            cv = rec.confirmVerf;
+        } else {
+            clientid = m_nextClientid++;
+            //  Confirm verifier: deterministic mix of the request (no wall clock/RNG).
+            cv = viewFileid(clientid ^ verifier, std::hash<std::string>{}(id));
+            m_clients[clientid] =
+                ClientRec{clientid, id, verifier, cv, false, cbProgram, cbNetid, cbAddr, cbIdent};
+        }
+        m_host.log().info("nfsv4: SETCLIENTID id='{}' cb={}/{} -> clientid={} (callback recorded)",
+                          id, cbNetid, cbAddr, clientid);
+        rw.u32(NFS4_OK);
+        rw.u64(clientid); // SETCLIENTID4resok.clientid
+        rw.u64(cv);       // setclientid_confirm verifier (8 bytes)
+        return NFS4_OK;
+    }
+
+    //  SETCLIENTID_CONFIRM: promote the pending clientid to confirmed. If another
+    //  confirmed lease exists for the same id string (client rebooted / re-mounted),
+    //  purge its state first — this is the reboot-recovery path.
+    uint32_t opSetClientidConfirm(Reader& r, Writer& rw) {
+        uint64_t clientid = r.u64();
+        uint64_t confirm = r.u64(); // setclientid_confirm verifier
+        std::lock_guard<std::mutex> lk(m_clientMu);
+        auto it = m_clients.find(clientid);
+        if (it == m_clients.end()) {
+            rw.u32(NFS4ERR_STALE_CLIENTID);
+            return NFS4ERR_STALE_CLIENTID;
+        }
+        ClientRec& rec = it->second;
+        if (rec.confirmVerf != confirm) {
+            rw.u32(NFS4ERR_STALE_CLIENTID);
+            return NFS4ERR_STALE_CLIENTID;
+        }
+        if (!rec.confirmed) {
+            std::vector<uint64_t> stale; // other confirmed leases for the same client
+            for (auto const& [k, c] : m_clients) {
+                if (k != clientid && c.confirmed && c.id == rec.id) {
+                    stale.push_back(k);
+                }
+            }
+            for (uint64_t k : stale) {
+                purgeClientState(k);
+                m_clients.erase(k);
+            }
+            rec.confirmed = true;
+            m_host.log().info("nfsv4: SETCLIENTID_CONFIRM clientid={} confirmed ({} stale purged)",
+                              clientid, stale.size());
+        }
+        rw.u32(NFS4_OK);
+        return NFS4_OK;
+    }
+
+    //  RENEW: refresh the lease. Unknown/unconfirmed clientid ⇒ STALE_CLIENTID.
+    //  Leases never expire here, so a confirmed clientid always renews OK.
+    uint32_t opRenew(Reader& r, Writer& rw) {
+        uint64_t clientid = r.u64();
+        if (!clientConfirmed(clientid)) {
+            rw.u32(NFS4ERR_STALE_CLIENTID);
+            return NFS4ERR_STALE_CLIENTID;
+        }
+        rw.u32(NFS4_OK);
         return NFS4_OK;
     }
 
@@ -1788,7 +1939,13 @@ private:
     std::optional<tcp::acceptor> m_acc;
     std::vector<std::thread> m_threads;
     std::atomic<bool> m_running{false};
-    std::atomic<uint64_t> m_clientid{1};
+
+    //  Client lease registry (SETCLIENTID). Guarded by m_clientMu, which is always
+    //  taken *before* m_stateMu (reboot recovery purges open/lock state). Keyed by
+    //  the server-assigned clientid; m_nextClientid mints them.
+    std::mutex m_clientMu;
+    uint64_t m_nextClientid = 1;
+    std::unordered_map<uint64_t, ClientRec> m_clients;
 
     //  READDIR cookie→resume-name cache (see nameCookie/resumeName). Bounded;
     //  guarded independently of the store lock since READDIR holds it shared.
@@ -1802,6 +1959,9 @@ private:
     uint64_t m_nextState = 1;
     std::unordered_map<uint64_t, OpenState> m_opens;
     std::unordered_map<uint64_t, LockState> m_locks;
+    //  Open-owners (clientid, owner) that completed OPEN_CONFIRM. Once confirmed, an
+    //  owner can hold locks and its later opens skip the CONFIRM handshake.
+    std::set<std::pair<uint64_t, std::string>> m_confirmedOwners;
 };
 
 struct NfsV4Plugin : IPlugin {

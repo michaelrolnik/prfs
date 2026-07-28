@@ -167,3 +167,40 @@ change); nfsv3 SETATTR now keeps the client `nseconds` and fattr3 encodes it
 `tests/nfsv3/nfsv3_test.cpp::SetattrSubsecondMtime` (RED before: nsec == 0). The
 diff canon ignores timestamps, so the differential suite is unaffected; 22 tests
 green on both engines.
+
+### B13 — NFSv4.0 real-client byte-range locking returned ENOLCK 🟠 ✅
+
+`fcntl(F_SETLK)` over a real Linux NFSv4.0 mount failed with `ENOLCK` and the
+client never even sent a LOCK on the wire — the kernel short-circuited in
+`nfs4_proc_lock` (`state == NULL → -ENOLCK`), i.e. the open-owner was never
+usable for locking. Reads and writes still worked because the client fell back to
+the *anonymous* (all-zero) stateid, which the permissive server accepted — so the
+missing lock state was invisible until `fcntl`.
+
+Two server-side omissions, found by tracing the client (`rpcdebug`) and diffing
+our OPEN reply byte-for-byte against knfsd's (`scripts/nfsv4-lock-debug.sh`,
+`scripts/nfsv4-open-capture.sh` + `scripts/nfsv4-decode-open.py`; the control
+`scripts/nfsv4-lock-control.sh` proved the same client *does* lock knfsd, so the
+fault was ours):
+
+1. **No clientid/lease state.** SETCLIENTID minted a throwaway id and OPEN accepted
+   any clientid, so a stale clientid cached across a `--clean` restart was never
+   rejected and the client never re-ran the handshake. Fixed with a real client
+   registry: SETCLIENTID (idempotent on id+verifier) / SETCLIENTID_CONFIRM with a
+   confirmed flag, RENEW, and OPEN/LOCK rejecting an unconfirmed clientid with
+   `NFS4ERR_STALE_CLIENTID` (which forces the handshake); reboot recovery purges a
+   superseded client's open/lock state.
+2. **The actual fix — OPEN reply `rflags`.** knfsd returns
+   `OPEN4_RESULT_CONFIRM | OPEN4_RESULT_LOCKTYPE_POSIX` (0x6); we returned 0. Without
+   `CONFIRM` the client never confirms a new open-owner via OPEN_CONFIRM, so it
+   stays unusable for locks. Now OPEN advertises `LOCKTYPE_POSIX` always and
+   `CONFIRM` for a not-yet-confirmed open-owner, and OPEN_CONFIRM records the owner
+   as confirmed (tracked in `m_confirmedOwners`; later opens by it skip CONFIRM).
+   RELEASE_LOCKOWNER is now a proper no-op-OK cleanup instead of `NOTSUPP`.
+
+Callbacks are recorded from SETCLIENTID but not dialed: the server grants no
+delegations, so no CB_ channel is needed for locking. Verified end to end — the
+probe acquires and releases the lock, with OPEN_CONFIRM/LOCK/LOCKU/RELEASE_LOCKOWNER
+all on the wire. Regression coverage: `tests/nfsv4` `ClientidLeaseRequired`
+(unconfirmed clientid ⇒ STALE_CLIENTID) and `OpenConfirmRflags` (CONFIRM+
+LOCKTYPE_POSIX for a new owner, CONFIRM clears after OPEN_CONFIRM); 6 tests green.

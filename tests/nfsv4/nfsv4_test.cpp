@@ -118,6 +118,45 @@ Reply rpc(int fd, uint32_t proc, std::vector<uint8_t> const& args) {
     return {astat, std::vector<uint8_t>(rep.begin() + off, rep.end())};
 }
 
+//  Run SETCLIENTID + SETCLIENTID_CONFIRM and return the confirmed clientid. OPEN
+//  and LOCK now require a confirmed lease (else NFS4ERR_STALE_CLIENTID).
+uint64_t establishClient(int fd, std::string const& id) {
+    std::vector<uint8_t> c;
+    put32(c, 0);                  // tag
+    put32(c, 0);                  // minorversion
+    put32(c, 1);                  // numops
+    put32(c, 35);                 // OP_SETCLIENTID
+    putU64(c, 0xC0FFEEULL);       // client.verifier
+    putStr(c, id);                // client.id<>
+    put32(c, 0x40000000);         // cb_program
+    putStr(c, "tcp");             // cb_location.r_netid
+    putStr(c, "127.0.0.1.140.0"); // cb_location.r_addr
+    put32(c, 1);                  // callback_ident
+    Reply rp = rpc(fd, 1, c);
+    EXPECT_EQ(rp.astat, 0u);
+    size_t o = 0;
+    o += 4; // COMPOUND status
+    uint32_t tl = get32(&rp.body[o]);
+    o += 4 + pad4(tl); // tag
+    o += 4;            // numres
+    o += 4 + 4;        // SETCLIENTID result: opnum + status
+    uint64_t clientid = get64(&rp.body[o]);
+    o += 8;
+    uint64_t confirmVerf = get64(&rp.body[o]);
+
+    std::vector<uint8_t> cc;
+    put32(cc, 0);
+    put32(cc, 0);
+    put32(cc, 1);
+    put32(cc, 36); // OP_SETCLIENTID_CONFIRM
+    putU64(cc, clientid);
+    putU64(cc, confirmVerf);
+    Reply r2 = rpc(fd, 1, cc);
+    EXPECT_EQ(r2.astat, 0u);
+    EXPECT_EQ(get32(&r2.body[0]), 0u); // COMPOUND status OK
+    return clientid;
+}
+
 } // namespace
 
 TEST(NfsV4, CompoundBrowseRead) {
@@ -346,15 +385,17 @@ TEST(NfsV4, WriteSurface) {
         }
     };
 
+    uint64_t cid = establishClient(fd, "writesurface-client");
+
     //  COMPOUND { PUTROOTFH, OPEN(create "new.txt" mode 0644), WRITE "hello", CLOSE }.
     {
         std::vector<uint8_t> ops;
-        put32(ops, 24); // PUTROOTFH
-        put32(ops, 18); // OPEN
-        put32(ops, 0);  // seqid
-        put32(ops, 2);  // share_access WRITE
-        put32(ops, 0);  // share_deny NONE
-        putU64(ops, 0); // owner.clientid
+        put32(ops, 24);   // PUTROOTFH
+        put32(ops, 18);   // OPEN
+        put32(ops, 0);    // seqid
+        put32(ops, 2);    // share_access WRITE
+        put32(ops, 0);    // share_deny NONE
+        putU64(ops, cid); // owner.clientid
         putStr(ops, "ownr");
         put32(ops, 1); // opentype OPEN4_CREATE
         put32(ops, 0); // createmode UNCHECKED4
@@ -474,6 +515,7 @@ TEST(NfsV4, ShareAndLockState) {
         EXPECT_EQ(rp.astat, 0u);
         return get32(&rp.body[0]); // COMPOUND status = last op's status
     };
+    uint64_t cid = establishClient(fd, "sharelock-client");
     auto openOp = [&](uint32_t access, uint32_t deny, std::string const& owner,
                       std::string const& name) {
         std::vector<uint8_t> o;
@@ -481,7 +523,7 @@ TEST(NfsV4, ShareAndLockState) {
         put32(o, 0);  // open_seqid
         put32(o, access);
         put32(o, deny);
-        putU64(o, 0); // open_owner.clientid
+        putU64(o, cid); // open_owner.clientid
         putStr(o, owner);
         put32(o, 0); // opentype NOCREATE
         put32(o, 0); // claim CLAIM_NULL
@@ -537,8 +579,8 @@ TEST(NfsV4, ShareAndLockState) {
         for (int i = 0; i < 4; ++i) {
             put32(ops, 0); // open_stateid (all-zero special)
         }
-        put32(ops, 0);  // lock_seqid
-        putU64(ops, 0); // lock_owner.clientid
+        put32(ops, 0);    // lock_seqid
+        putU64(ops, cid); // lock_owner.clientid
         putStr(ops, "LA");
         EXPECT_EQ(compound(ops, 3), 0u); // LOCK OK
     }
@@ -555,6 +597,163 @@ TEST(NfsV4, ShareAndLockState) {
         putStr(ops, "LB");
         EXPECT_EQ(compound(ops, 3), 10010u); // NFS4ERR_DENIED
     }
+
+    ::close(fd);
+    loader.stopAll();
+}
+
+//  A confirmed clientid lease is required for OPEN/RENEW: an unconfirmed clientid
+//  gets NFS4ERR_STALE_CLIENTID (this is what forces a real client to run the
+//  SETCLIENTID handshake before it can hold lock state), and after the handshake
+//  the same operations succeed.
+TEST(NfsV4, ClientidLeaseRequired) {
+    const int port = 34584;
+
+    auto fs = makeMemStore();
+    Node root = fs->rwRoot();
+    Node f = fs->mkfile("");
+    f->size(4);
+    ASSERT_EQ(fs->link(root, "f", f), Error::OK);
+
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV4_PLUGIN_SO));
+    loader.startServices();
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    auto compound = [&](std::vector<uint8_t> ops, uint32_t nops) -> uint32_t {
+        std::vector<uint8_t> c;
+        put32(c, 0);
+        put32(c, 0);
+        put32(c, nops);
+        c.insert(c.end(), ops.begin(), ops.end());
+        Reply rp = rpc(fd, 1, c);
+        EXPECT_EQ(rp.astat, 0u);
+        return get32(&rp.body[0]);
+    };
+    auto openF = [&](uint64_t clientid) {
+        std::vector<uint8_t> ops;
+        put32(ops, 24); // PUTROOTFH
+        put32(ops, 18); // OPEN
+        put32(ops, 0);  // open_seqid
+        put32(ops, 1);  // share_access READ
+        put32(ops, 0);  // share_deny NONE
+        putU64(ops, clientid);
+        putStr(ops, "owner");
+        put32(ops, 0); // opentype NOCREATE
+        put32(ops, 0); // claim CLAIM_NULL
+        putStr(ops, "f");
+        return compound(ops, 2);
+    };
+    auto renew = [&](uint64_t clientid) {
+        std::vector<uint8_t> ops;
+        put32(ops, 30); // RENEW
+        putU64(ops, clientid);
+        return compound(ops, 1);
+    };
+
+    //  Unconfirmed clientid ⇒ STALE_CLIENTID on both OPEN and RENEW.
+    EXPECT_EQ(openF(999), 10022u);
+    EXPECT_EQ(renew(999), 10022u);
+
+    //  After the handshake, the same operations succeed.
+    uint64_t cid = establishClient(fd, "lease-client");
+    EXPECT_EQ(renew(cid), 0u);
+    EXPECT_EQ(openF(cid), 0u);
+
+    ::close(fd);
+    loader.stopAll();
+}
+
+//  OPEN advertises LOCKTYPE_POSIX always, and OPEN4_RESULT_CONFIRM for a not-yet-
+//  confirmed open-owner. Without CONFIRM the Linux client never marks the owner
+//  usable and fcntl short-circuits to ENOLCK. After OPEN_CONFIRM, a re-open by the
+//  same owner no longer sets CONFIRM.
+TEST(NfsV4, OpenConfirmRflags) {
+    const int port = 34585;
+
+    auto fs = makeMemStore();
+    Node root = fs->rwRoot();
+    Node f = fs->mkfile("");
+    f->size(4);
+    ASSERT_EQ(fs->link(root, "f", f), Error::OK);
+    uint64_t fid = f->id();
+
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV4_PLUGIN_SO));
+    loader.startServices();
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    uint64_t cid = establishClient(fd, "confirm-client");
+
+    //  OPEN "f" (nocreate) as `owner`; return {rflags, open_stateid[16]}.
+    auto openF = [&](std::string const& owner) -> std::pair<uint32_t, std::vector<uint8_t>> {
+        std::vector<uint8_t> c;
+        put32(c, 0);
+        put32(c, 0);
+        put32(c, 2);
+        put32(c, 24); // PUTROOTFH
+        put32(c, 18); // OPEN
+        put32(c, 0);  // open_seqid
+        put32(c, 1);  // share_access READ
+        put32(c, 0);  // share_deny NONE
+        putU64(c, cid);
+        putStr(c, owner);
+        put32(c, 0); // opentype NOCREATE
+        put32(c, 0); // claim CLAIM_NULL
+        putStr(c, "f");
+        Reply rp = rpc(fd, 1, c);
+        EXPECT_EQ(rp.astat, 0u);
+        size_t o = 0;
+        o += 4; // COMPOUND status
+        uint32_t tl = get32(&rp.body[o]);
+        o += 4 + pad4(tl); // tag
+        o += 4;            // numres
+        o += 4 + 4;        // PUTROOTFH: opnum + status
+        o += 4;            // OPEN opnum
+        EXPECT_EQ(get32(&rp.body[o]), 0u);
+        o += 4; // OPEN status
+        std::vector<uint8_t> sid(rp.body.begin() + o, rp.body.begin() + o + 16);
+        o += 16;                          // stateid
+        o += 4 + 8 + 8;                   // cinfo: atomic + before + after
+        return {get32(&rp.body[o]), sid}; // rflags
+    };
+
+    //  First open of a new owner: CONFIRM | LOCKTYPE_POSIX.
+    auto [rf1, sid1] = openF("owner-x");
+    EXPECT_EQ(rf1 & 4u, 4u) << "LOCKTYPE_POSIX";
+    EXPECT_EQ(rf1 & 2u, 2u) << "CONFIRM for new owner";
+
+    //  OPEN_CONFIRM the owner (PUTFH the file, then confirm with the open stateid).
+    {
+        std::vector<uint8_t> c;
+        put32(c, 0);
+        put32(c, 0);
+        put32(c, 2);
+        put32(c, 22); // PUTFH
+        put32(c, 16);
+        putU64(c, fid);
+        putU64(c, ~uint64_t(0)); // LATEST snap
+        put32(c, 20);            // OPEN_CONFIRM
+        c.insert(c.end(), sid1.begin(), sid1.end());
+        put32(c, 1); // seqid
+        Reply rp = rpc(fd, 1, c);
+        EXPECT_EQ(rp.astat, 0u);
+        EXPECT_EQ(get32(&rp.body[0]), 0u);
+    }
+
+    //  Re-open by the now-confirmed owner: LOCKTYPE_POSIX but NO CONFIRM.
+    auto [rf2, sid2] = openF("owner-x");
+    (void)sid2;
+    EXPECT_EQ(rf2 & 4u, 4u) << "LOCKTYPE_POSIX still set";
+    EXPECT_EQ(rf2 & 2u, 0u) << "no CONFIRM once owner is confirmed";
 
     ::close(fd);
     loader.stopAll();

@@ -25,6 +25,7 @@
 #include "prfs/prfs.hpp"
 
 #include <CLI/CLI.hpp>
+#include <spdlog/cfg/env.h>
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -106,6 +107,7 @@ int main(int argc, char** argv) {
     CLI11_PARSE(app, argc, argv);
 
     auto log = spdlog::default_logger();
+    spdlog::cfg::load_env_levels(); // honor SPDLOG_LEVEL=debug for wire-level traces
 
     try {
         if (!engine.empty()) {

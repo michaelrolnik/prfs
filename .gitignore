@@ -2,3 +2,8 @@
 /.deps/
 /.idea/
 /HANDOFF.md
+
+# transient diagnostic output
+log.txt
+capture.txt
+control.txt
