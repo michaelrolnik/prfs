@@ -36,7 +36,7 @@ Status: ✅ done · 🚧 in progress · ⬜ open.
 | S11 | ✅     | `prfs-lua` bindings (sol2) + `prfs-test` Lua harness (§12)                  |
 | S12 | ✅     | Statistics (§9): `FSSTAT`/`FSINFO` mapping                                  |
 | L1  | ✅     | Content provider (`libprfs-content`) + `rng` (di); FS config in store meta; `prfs.content` Lua |
-| L2  | ✅     | NFS front-ends: `nfsv3` + MOUNT (full); `nfsv4` COMPOUND (browse/read cut)   |
+| L2  | ✅     | NFS front-ends: `nfsv3` + MOUNT (full); `nfsv4` COMPOUND read+write (no lock state yet) |
 | L3  | ⬜     | GC / compaction: reclaim superseded link-set versions + unref content       |
 | L4  | 🚧     | Footprint stats: sparse/allocated done; cross-file dedup counting deferred  |
 | L5  | ✅     | DI registry ✅ · plugin host ✅ (loader, prfs-host, serve loop, `--set`)    |
