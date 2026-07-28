@@ -60,6 +60,16 @@ if get_option('plugins')
     )
     test('nfsv3', test_nfsv3, depends : nfsv3_so, timeout : 60)
 
+    test_nfsv4 = executable(
+        'test_nfsv4',
+        'nfsv4/nfsv4_test.cpp',
+        include_directories : [test_inc, prfs_inc, spdlog_inc],
+        override_options    : ['warning_level=0'],
+        cpp_args            : ['-DNFSV4_PLUGIN_SO="' + nfsv4_so.full_path() + '"'],
+        dependencies        : [prfs_host_dep, prfs_ref_dep, gtest_dep],
+    )
+    test('nfsv4', test_nfsv4, depends : nfsv4_so, timeout : 60)
+
     if get_option('lua')
         test_luactl = executable(
             'test_luactl',

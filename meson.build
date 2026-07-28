@@ -267,6 +267,19 @@ if get_option('plugins')
         dependencies        : [threads_dep, prfs_nfs_dep] + bigtree_deps,
     )
 
+    #   nfsv4 front-end service (→ nfsv4.so). NFSv4.0 COMPOUND server, browse/read
+    #   path; standalone Asio like nfsv3, but no MOUNT program. Reaches the store
+    #   only through IHost/IPrfs virtuals, so it needs no prfs symbols linked.
+    nfsv4_so = shared_module(
+        'nfsv4',
+        'plugins/nfsv4/nfsv4.cpp',
+        include_directories : [prfs_inc, spdlog_inc, asio_inc],
+        override_options    : ['warning_level=0'],
+        cpp_args            : ['-DASIO_STANDALONE'],
+        name_prefix         : '',
+        dependencies        : [threads_dep],
+    )
+
     #   luactl — live Lua console over a unix socket (→ luactl.so). Reuses the
     #   sol2 bindings; only built alongside the Lua layer (-Dlua). prfs_lua_dep is
     #   linked into the module so registerLua + sol2 + lua are self-contained.
@@ -323,11 +336,13 @@ fmt_files = files(
     'src/host/main.cpp',
     'plugins/null/null.cpp',
     'plugins/nfsv3/nfsv3.cpp',
+    'plugins/nfsv4/nfsv4.cpp',
     'plugins/luactl/luactl.cpp',
     'plugins/bigtree/bigtree.cpp',
     'plugins/perf/perf.cpp',
     'tests/host/host_test.cpp',
     'tests/nfsv3/nfsv3_test.cpp',
+    'tests/nfsv4/nfsv4_test.cpp',
     'tests/luactl/luactl_test.cpp',
     'tests/perf/perf_test.cpp',
     'tests/support.hpp',

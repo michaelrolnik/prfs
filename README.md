@@ -66,7 +66,8 @@ This is the whole point: writes and rewrites cost a seed update, not a terabyte.
 - **DI registry** (`docs/di.md`) — storage engines, RNGs, content providers, and
   services are all self-registering providers keyed by interface + name.
 - **Plugin host** — `prfs-host` `dlopen`s service plugins (`docs/plugins.md`):
-  **nfsv3** (a full read-write NFSv3 + MOUNT server on Asio), **luactl** (a live
+  **nfsv3** (a full read-write NFSv3 + MOUNT server on Asio), **nfsv4** (an
+  NFSv4.0 COMPOUND server — browse/read first cut, no MOUNT), **luactl** (a live
   Lua console over a unix socket), **bigtree** (a native store-builder that
   populates a large synthetic tree on start), and **perf** (benchmarks the
   content generator, single- and multi-threaded).
@@ -194,6 +195,7 @@ before `nfsv3` starts serving:
 | `src/host/` | `prfs-host` + the plugin loader |
 | `src/lua/` | sol2 bindings + `prfs-test` scenario runner (`-Dlua`) |
 | `plugins/nfsv3/` | the NFSv3 + MOUNT service |
+| `plugins/nfsv4/` | the NFSv4.0 COMPOUND service (browse/read first cut) |
 | `plugins/luactl/` | live Lua console over a unix socket |
 | `plugins/bigtree/` | native store-builder (large synthetic tree) |
 | `plugins/perf/` | read-performance benchmark (content generator) |
