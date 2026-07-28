@@ -29,10 +29,12 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -89,9 +91,25 @@ constexpr uint32_t SET_TO_SERVER_TIME4 = 0, SET_TO_CLIENT_TIME4 = 1;
 constexpr uint32_t NFS4_OK = 0, NFS4ERR_PERM = 1, NFS4ERR_NOENT = 2, NFS4ERR_IO = 5,
                    NFS4ERR_EXIST = 17, NFS4ERR_NOTDIR = 20, NFS4ERR_ISDIR = 21, NFS4ERR_INVAL = 22,
                    NFS4ERR_ROFS = 30, NFS4ERR_NOTEMPTY = 66, NFS4ERR_STALE = 70,
-                   NFS4ERR_BADHANDLE = 10001, NFS4ERR_NOTSUPP = 10004, NFS4ERR_RESOURCE = 10018,
-                   NFS4ERR_NOFILEHANDLE = 10020, NFS4ERR_ATTRNOTSUPP = 10032,
-                   NFS4ERR_OP_ILLEGAL = 10044;
+                   NFS4ERR_BADHANDLE = 10001, NFS4ERR_BAD_COOKIE = 10003, NFS4ERR_NOTSUPP = 10004,
+                   NFS4ERR_RESOURCE = 10018, NFS4ERR_NOFILEHANDLE = 10020,
+                   NFS4ERR_ATTRNOTSUPP = 10032, NFS4ERR_OP_ILLEGAL = 10044;
+
+//  READDIR cookie ↔ name bridge (as in nfsv3): NFSv4 cookies are opaque u64 the
+//  client echoes back; the store resumes readdirPage by NAME. An entry's cookie
+//  is a 64-bit hash of its name with the top bit set — always > 2 (RFC 7530
+//  reserves cookies 0/1/2) and resolvable back to the name-cursor (stable under
+//  concurrent add/remove, unlike a positional ordinal). Cookie 0 = start.
+constexpr uint64_t CK_ENTRY = uint64_t(1) << 63;
+
+uint64_t nameCookie(std::string const& name) {
+    uint64_t h = 1469598103934665603ull; // FNV-1a/64
+    for (unsigned char c : name) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return h | CK_ENTRY;
+}
 
 //  attribute-fold for WRITE: a write stores no bytes — it evolves the file's
 //  content seed (FNV-1a over seed, offset, data), so READ regenerates content
@@ -1008,15 +1026,51 @@ private:
         return NFS4_OK;
     }
 
-    //  READDIR: cookie/verifier + dircount/maxcount + attr bitmap. Minimal, stable
-    //  scheme: cookie = a 1-based ordinal over the store's readdir (re-listed per
-    //  call). Good enough for a first cut; the nfsv3 name-cursor is the upgrade.
+    //  Remember an entry cookie→name so a resume is O(1); bounded (clears on
+    //  overflow, a miss then falls back to a scan). Guarded independently.
+    void rememberCookie(uint64_t ck, std::string const& name) {
+        std::lock_guard<std::mutex> lk(m_ckMu);
+        if (m_ckName.size() >= CK_CACHE_MAX) {
+            m_ckName.clear();
+        }
+        m_ckName[ck] = name;
+    }
+
+    //  The name to resume readdirPage *after*, for an entry cookie. Cache hit is
+    //  O(1); a miss falls back to a scan for a still-present entry, else nullopt
+    //  ⇒ NFS4ERR_BAD_COOKIE (the client restarts the scan).
+    std::optional<std::string> resumeName(IPrfs& fs, Node const& dir, uint64_t ck) {
+        {
+            std::lock_guard<std::mutex> lk(m_ckMu);
+            auto it = m_ckName.find(ck);
+            if (it != m_ckName.end()) {
+                return it->second;
+            }
+        }
+        std::string after;
+        for (;;) {
+            DirPage pg = fs.readdirPage(dir, after, 256);
+            for (auto const& [name, node] : pg.entries) {
+                if (nameCookie(name) == ck) {
+                    return name;
+                }
+            }
+            if (pg.entries.empty() || pg.eof) {
+                return std::nullopt;
+            }
+            after = pg.cookie;
+        }
+    }
+
+    //  READDIR — pages the store's stable readdirPage name-cursor (O(page), immune
+    //  to concurrent add/remove). Cookie 0 starts; an entry cookie resolves to its
+    //  name (cache or scan) to resume. NFSv4 READDIR carries no "." / "..".
     uint32_t opReaddir(Reader& r, Writer& rw) {
         IPrfs& fs = m_host.fs();
         uint64_t cookie = r.u64();
         r.skip(8);             // cookieverf
-        r.u32();               // dircount
-        uint32_t mx = r.u32(); // maxcount
+        r.u32();               // dircount (advisory)
+        uint32_t mx = r.u32(); // maxcount (reply size cap)
         std::vector<uint32_t> req = r.bitmap();
         Node dir = cur(fs);
         if (!dir) {
@@ -1027,30 +1081,50 @@ private:
             rw.u32(NFS4ERR_NOTDIR);
             return NFS4ERR_NOTDIR;
         }
-        rw.u32(NFS4_OK);
-        rw.u64(0); // cookieverf
-
-        auto ents = fs.readdir(dir);
-        size_t budget = 64;
-        bool eof = true;
-        uint64_t idx = 0;
-        for (auto& [name, node] : ents) {
-            ++idx;
-            if (idx <= cookie) {
-                continue;
+        std::string after;
+        if (cookie != 0) {
+            auto rn = resumeName(fs, dir, cookie);
+            if (!rn) {
+                rw.u32(NFS4ERR_BAD_COOKIE);
+                return NFS4ERR_BAD_COOKIE;
             }
-            std::vector<uint8_t> one;
-            Writer ew{one};
-            ew.u64(idx); // cookie
-            ew.str(name);
-            encodeFattr4(ew, req, *node, node->id(), node->snap());
-            if (budget + one.size() + 16 > mx) {
-                eof = false;
+            after = *rn;
+        }
+        rw.u32(NFS4_OK);
+        for (int i = 0; i < 8; ++i) {
+            rw.v.push_back(0); // cookieverf (name-cursor is stable ⇒ constant)
+        }
+
+        size_t budget = 96; // status + cookieverf + trailing eof already accounted
+        bool eof = false;
+        bool stop = false;
+        while (!stop) {
+            DirPage pg = fs.readdirPage(dir, after, 512);
+            for (auto& [name, node] : pg.entries) {
+                std::vector<uint8_t> one;
+                Writer ew{one};
+                uint64_t ck = nameCookie(name);
+                ew.u64(ck);
+                ew.str(name);
+                encodeFattr4(ew, req, *node, node->id(), node->snap());
+                if (budget + one.size() + 8 > mx) {
+                    stop = true;
+                    break;
+                }
+                rememberCookie(ck, name);
+                rw.u32(1); // value-follows
+                rw.v.insert(rw.v.end(), one.begin(), one.end());
+                budget += one.size() + 4;
+                after = name;
+            }
+            if (stop) {
                 break;
             }
-            rw.u32(1); // value-follows
-            rw.v.insert(rw.v.end(), one.begin(), one.end());
-            budget += one.size() + 4;
+            if (pg.entries.empty() || pg.eof) {
+                eof = true;
+                break;
+            }
+            after = pg.cookie;
         }
         rw.u32(0);           // no more entries
         rw.u32(eof ? 1 : 0); // eof
@@ -1373,6 +1447,12 @@ private:
     std::vector<std::thread> m_threads;
     std::atomic<bool> m_running{false};
     std::atomic<uint64_t> m_clientid{1};
+
+    //  READDIR cookie→resume-name cache (see nameCookie/resumeName). Bounded;
+    //  guarded independently of the store lock since READDIR holds it shared.
+    static constexpr size_t CK_CACHE_MAX = 1u << 16;
+    std::mutex m_ckMu;
+    std::unordered_map<uint64_t, std::string> m_ckName;
 };
 
 struct NfsV4Plugin : IPlugin {

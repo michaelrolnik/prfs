@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -201,6 +202,115 @@ TEST(NfsV4, CompoundBrowseRead) {
     EXPECT_EQ(get32(&rp.body[o]), 1u); // eof (whole 8-byte file read)
     o += 4;
     EXPECT_EQ(get32(&rp.body[o]), 8u); // data length
+
+    ::close(fd);
+    loader.stopAll();
+}
+
+//  Paged READDIR must be stable under a concurrent removal: an entry removed
+//  behind the cursor mid-scan must not skip a surviving entry ahead of it. The
+//  name-cursor (readdirPage) resumes by name and is immune, unlike an ordinal.
+TEST(NfsV4, ReaddirPagedStableUnderMutation) {
+    const int port = 34582;
+    const uint64_t LAT = ~uint64_t(0);
+
+    auto fs = makeMemStore();
+    Node big = fs->mkdir();
+    ASSERT_EQ(fs->link(fs->rwRoot(), "big", big), Error::OK);
+    for (int i = 0; i < 10; ++i) {
+        Node f = fs->mkfile("");
+        ASSERT_EQ(fs->link(big, "e" + std::to_string(i), f), Error::OK);
+    }
+    uint64_t bid = big->id();
+
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV4_PLUGIN_SO));
+    loader.startServices();
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    //  One READDIR page from `cookie`; appends (name,cookie) and returns eof.
+    auto page = [&](uint64_t cookie, std::vector<std::pair<std::string, uint64_t>>& out) -> bool {
+        std::vector<uint8_t> c;
+        put32(c, 0);
+        put32(c, 0);
+        put32(c, 2);  // numops
+        put32(c, 22); // PUTFH
+        put32(c, 16); // fh length
+        putU64(c, bid);
+        putU64(c, LAT);
+        put32(c, 26);      // READDIR
+        putU64(c, cookie); // cookie
+        putU64(c, 0);      // cookieverf
+        put32(c, 4096);    // dircount
+        put32(c, 170);     // maxcount (small ⇒ ~1 entry/page)
+        put32(c, 0);       // attr bitmap: empty
+        Reply rp = rpc(fd, 1, c);
+        EXPECT_EQ(rp.astat, 0u);
+        size_t o = 0;
+        o += 4; // COMPOUND status
+        uint32_t tl = get32(&rp.body[o]);
+        o += 4 + pad4(tl);
+        o += 4;     // numres
+        o += 4 + 4; // PUTFH result: opnum + status
+        o += 4 + 4; // READDIR result: opnum + status
+        o += 8;     // cookieverf
+        while (get32(&rp.body[o]) == 1) {
+            o += 4; // value-follows
+            uint64_t ck = get64(&rp.body[o]);
+            o += 8;
+            uint32_t nl = get32(&rp.body[o]);
+            o += 4;
+            std::string nm(reinterpret_cast<char const*>(&rp.body[o]), nl);
+            o += pad4(nl);
+            uint32_t bcnt = get32(&rp.body[o]);
+            o += 4 + bcnt * 4; // attrmask
+            uint32_t alen = get32(&rp.body[o]);
+            o += 4 + pad4(alen); // attrlist
+            out.push_back({nm, ck});
+        }
+        o += 4; // value-follows == 0
+        return get32(&rp.body[o]) == 1;
+    };
+
+    std::vector<std::string> seen;
+    auto sawDup = [&](std::string const& n) {
+        return std::find(seen.begin(), seen.end(), n) != seen.end();
+    };
+    uint64_t cookie = 0;
+    bool eof = false, mutated = false;
+    std::string cursor;
+    for (int guard = 0; !eof && guard < 100; ++guard) {
+        std::vector<std::pair<std::string, uint64_t>> ents;
+        eof = page(cookie, ents);
+        for (auto& [nm, ck] : ents) {
+            cookie = ck;
+            EXPECT_FALSE(sawDup(nm)) << "duplicate: " << nm;
+            seen.push_back(nm);
+            cursor = nm;
+        }
+        if (!mutated && seen.size() >= 2) {
+            std::string victim; // smallest seen != cursor ⇒ behind the cursor
+            for (auto const& s : seen) {
+                if (s != cursor) {
+                    victim = s;
+                    break;
+                }
+            }
+            ASSERT_FALSE(victim.empty());
+            ASSERT_EQ(fs->unlink(big, victim), Error::OK); // remove behind the cursor
+            mutated = true;
+        }
+    }
+    EXPECT_TRUE(eof);
+    EXPECT_TRUE(mutated);
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_TRUE(sawDup("e" + std::to_string(i))) << "skipped survivor: e" << i;
+    }
+    EXPECT_EQ(seen.size(), 10u);
 
     ::close(fd);
     loader.stopAll();
