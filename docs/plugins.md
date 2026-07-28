@@ -212,6 +212,7 @@ Concrete `IService` providers shipped in `plugins/`, each built as `<name>.so`:
 | Plugin | di name | What `start()` does |
 |--------|---------|---------------------|
 | `nfsv3` | `nfsv3` | Binds the NFSv3 + MOUNT server (Asio coroutines, own io-thread pool). The real front-end. |
+| `nfsv4` | `nfsv4` | Binds an NFSv4.0 COMPOUND server (no MOUNT — PUTROOTFH replaces it): read + write + share reservations + real-client byte-range locking (clientid/lease, OPEN_CONFIRM). |
 | `luactl` | `luactl` | Opens a live Lua console on a unix socket (`--control`), `fs` bound to the running store. |
 | `bigtree` | `bigtree` | **Builds** a large synthetic tree into the store, then idles (serves no network). |
 | `perf` | `perf` | **Benchmarks** the content generator (read throughput), single/multi-thread, then idles. |

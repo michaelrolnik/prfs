@@ -67,7 +67,8 @@ This is the whole point: writes and rewrites cost a seed update, not a terabyte.
   services are all self-registering providers keyed by interface + name.
 - **Plugin host** — `prfs-host` `dlopen`s service plugins (`docs/plugins.md`):
   **nfsv3** (a full read-write NFSv3 + MOUNT server on Asio), **nfsv4** (an
-  NFSv4.0 COMPOUND server — browse/read first cut, no MOUNT), **luactl** (a live
+  NFSv4.0 COMPOUND server — read + write + share/byte-range locking, no MOUNT),
+  **luactl** (a live
   Lua console over a unix socket), **bigtree** (a native store-builder that
   populates a large synthetic tree on start), and **perf** (benchmarks the
   content generator, single- and multi-threaded).
@@ -168,6 +169,7 @@ model in [`docs/plugins.md`](docs/plugins.md).
 | Plugin | Purpose | Key options / flags |
 |--------|---------|---------------------|
 | `nfsv3` | Full read-write **NFSv3 + MOUNT** server on Asio coroutines — the real front-end | host `--port`, `--time-advance` |
+| `nfsv4` | **NFSv4.0 COMPOUND** server (no MOUNT): read + write + share reservations + real-client **byte-range locking** (clientid/lease, OPEN_CONFIRM) | host `--port`, `--time-advance` |
 | `luactl` | **Live Lua console** over a unix socket (`socat READLINE UNIX-CONNECT:…`), `fs` bound to the running store | host `--control PATH` |
 | `bigtree` | Native **store-builder**: a large, reproducible, randomly-shaped tree (heavy-tailed file sizes, snapshots) | `--set bigtree.total/.depth/.dirs/.files/.seed/.snapshots/.force` |
 | `perf` | **Read-performance benchmark**: times the content generator (single/multi-thread) and the store read path vs the ceiling | `--set perf.bytes/.threads/.blocksize/.seed/.size` |
@@ -195,7 +197,7 @@ before `nfsv3` starts serving:
 | `src/host/` | `prfs-host` + the plugin loader |
 | `src/lua/` | sol2 bindings + `prfs-test` scenario runner (`-Dlua`) |
 | `plugins/nfsv3/` | the NFSv3 + MOUNT service |
-| `plugins/nfsv4/` | the NFSv4.0 COMPOUND service (browse/read first cut) |
+| `plugins/nfsv4/` | the NFSv4.0 COMPOUND service (read + write + share/byte-range locking) |
 | `plugins/luactl/` | live Lua console over a unix socket |
 | `plugins/bigtree/` | native store-builder (large synthetic tree) |
 | `plugins/perf/` | read-performance benchmark (content generator) |
@@ -210,7 +212,7 @@ before `nfsv3` starts serving:
 | [`docs/design.md`](docs/design.md) | Authoritative spec: node/link/snapshot model, versioning, diffs, invariants |
 | [`docs/content.md`](docs/content.md) | The procedural content provider: `ContentConfig`, seed→bytes, sparse/dedup |
 | [`docs/di.md`](docs/di.md) | The DI registry: interfaces, names, provide/resolve, self-registration |
-| [`docs/plugins.md`](docs/plugins.md) | Plugin ABI + host model; the in-tree services (nfsv3, luactl, bigtree, perf) |
+| [`docs/plugins.md`](docs/plugins.md) | Plugin ABI + host model; the in-tree services (nfsv3, nfsv4, luactl, bigtree, perf) |
 | [`docs/bugs.md`](docs/bugs.md) | The design-bug log (B1–B9) that the `T*` tasks fixed |
 | [`docs/todo.md`](docs/todo.md) | Living task list with status, keyed to `docs/bugs.md` |
 
