@@ -21,6 +21,7 @@ Resolved (or a reopened Open section).
 | B9  | 🟡  | ✅     | `stats().links` undercounted orphan-dir entries        | S9   |
 | B10 | 🟠  | ✅     | Parent dir mtime/ctime not updated on namespace change | L2   |
 | B11 | 🟠  | ✅     | READDIR skipped/duplicated entries under mid-scan mutation | L2   |
+| B12 | 🟡  | ✅     | SETATTR dropped the sub-second (nanosecond) mtime/atime    | L2   |
 
 ---
 
@@ -149,3 +150,20 @@ the client restarts — RFC 1813 permits it). Test-first regression
 while removing an entry behind the cursor and asserts no survivor is skipped or
 duplicated — RED with the ordinal scheme (skipped `e2`), GREEN with the
 name-cursor. Store/oracle unchanged.
+
+### B12 — SETATTR dropped the sub-second (nanosecond) mtime/atime 🟡 ✅
+
+Found running **pjdfstest** (`utimensat/08`). NFSv3 `nfstime3` carries `{seconds,
+nseconds}`, but SETATTR parsed the `nseconds` field and threw it away, and fattr3
+always encoded `nseconds = 0` — so a client-set sub-second atime/mtime did not
+round-trip. It matters for prfs's purpose: rsync/tar-style tools use sub-second
+mtime for change detection, so a synthetic target should preserve it. The
+integer *logical clock* is unchanged — only client-supplied times carry a
+sub-second part. Fixed by storing `atimeNs`/`mtimeNs` on the node (`INode`
+accessors; `NodeRec`/oracle `Attr` fields; the `atime(sec)`/`mtime(sec)` setters
+reset ns to 0 so server-time paths — WRITE, `touchDir`, creation — need no
+change); nfsv3 SETATTR now keeps the client `nseconds` and fattr3 encodes it
+(ctime stays whole-seconds, server-stamped). Test-first regression
+`tests/nfsv3/nfsv3_test.cpp::SetattrSubsecondMtime` (RED before: nsec == 0). The
+diff canon ignores timestamps, so the differential suite is unaffected; 22 tests
+green on both engines.

@@ -256,10 +256,16 @@ struct Writer {
         }
     }
 
-    //  nfstime3 — logical clock is a plain counter; map it to whole seconds.
+    //  nfstime3 — seconds from the logical clock; ctime has no sub-second part.
     void time(uint64_t t) {
         u32(uint32_t(t));
         u32(0);
+    }
+
+    //  nfstime3 with an explicit nanosecond component (atime/mtime).
+    void timeNs(uint64_t t, uint32_t ns) {
+        u32(uint32_t(t));
+        u32(ns);
     }
 
     //  opaque<>: length then the bytes, zero-padded to a 4-byte boundary.
@@ -340,8 +346,8 @@ void encodeFattr(Writer& w, INode& n) {
     //  matter how the client treats fsid — see viewFileid.
     w.u64(snap == LATEST ? 0 : snap); // fsid
     w.u64(viewFileid(n.id(), snap));  // fileid
-    w.time(n.atime());
-    w.time(n.mtime());
+    w.timeNs(n.atime(), n.atimeNsec());
+    w.timeNs(n.mtime(), n.mtimeNsec());
     w.time(n.ctime());
 }
 
@@ -1148,9 +1154,10 @@ private:
             }
         } else if (sa == SET_TO_CLIENT_TIME) {
             uint32_t sec = r.u32();
-            r.u32(); // nsec
+            uint32_t nsec = r.u32();
             if (n) {
-                n->atime(sec);
+                n->atime(sec);      // resets ns to 0 ...
+                n->atimeNsec(nsec); // ... then the client's sub-second part
             }
         }
         uint32_t sm = r.u32(); // set_mtime
@@ -1160,9 +1167,10 @@ private:
             }
         } else if (sm == SET_TO_CLIENT_TIME) {
             uint32_t sec = r.u32();
-            r.u32(); // nsec
+            uint32_t nsec = r.u32();
             if (n) {
-                n->mtime(sec);
+                n->mtime(sec);      // resets ns to 0 ...
+                n->mtimeNsec(nsec); // ... then the client's sub-second part
             }
         }
     }

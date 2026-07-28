@@ -70,7 +70,7 @@ static uint64_t snapBase(uint64_t id) { return id & ~SNAP_BIT; }
 namespace {
 
 struct NodeRec {
-    uint32_t type = 0, mode = 0, uid = 0, gid = 0, nlink = 0;
+    uint32_t type = 0, mode = 0, uid = 0, gid = 0, nlink = 0, atimeNs = 0, mtimeNs = 0;
     uint64_t size = 0, atime = 0, mtime = 0, ctime = 0, spec = 0, dnLinkVer = 0, upLinkVer = 0;
     std::string blob;
 };
@@ -92,6 +92,8 @@ std::string serialize(NodeRec const& r) {
     u64(r.spec);
     u64(r.dnLinkVer);
     u64(r.upLinkVer);
+    u32(r.atimeNs);
+    u32(r.mtimeNs);
     s.append(r.blob);
     return s;
 }
@@ -121,6 +123,8 @@ NodeRec deserialize(std::string_view v) {
     u64(r.spec);
     u64(r.dnLinkVer);
     u64(r.upLinkVer);
+    u32(r.atimeNs);
+    u32(r.mtimeNs);
     r.blob.assign(p + off, v.size() - off);
     return r;
 }
@@ -155,6 +159,10 @@ public:
     void mtime(uint64_t) override;
     uint64_t ctime() const override;
     void ctime(uint64_t) override;
+    uint32_t atimeNsec() const override;
+    void atimeNsec(uint32_t) override;
+    uint32_t mtimeNsec() const override;
+    void mtimeNsec(uint32_t) override;
 
     std::string target() const override;
     std::pair<uint32_t, uint32_t> rdev() const override;
@@ -971,15 +979,33 @@ void PrfsNode::size(uint64_t x) {
 }
 
 void PrfsNode::atime(uint64_t x) {
-    m_store->mutateNode(m_id, [&](NodeRec& r) { r.atime = x; });
+    m_store->mutateNode(m_id, [&](NodeRec& r) {
+        r.atime = x;
+        r.atimeNs = 0; // server-time set clears the sub-second part
+    });
 }
 
 void PrfsNode::mtime(uint64_t x) {
-    m_store->mutateNode(m_id, [&](NodeRec& r) { r.mtime = x; });
+    m_store->mutateNode(m_id, [&](NodeRec& r) {
+        r.mtime = x;
+        r.mtimeNs = 0;
+    });
 }
 
 void PrfsNode::ctime(uint64_t x) {
     m_store->mutateNode(m_id, [&](NodeRec& r) { r.ctime = x; });
+}
+
+uint32_t PrfsNode::atimeNsec() const { return m_store->readNode(m_id, m_snap).atimeNs; }
+
+void PrfsNode::atimeNsec(uint32_t x) {
+    m_store->mutateNode(m_id, [&](NodeRec& r) { r.atimeNs = x; });
+}
+
+uint32_t PrfsNode::mtimeNsec() const { return m_store->readNode(m_id, m_snap).mtimeNs; }
+
+void PrfsNode::mtimeNsec(uint32_t x) {
+    m_store->mutateNode(m_id, [&](NodeRec& r) { r.mtimeNs = x; });
 }
 
 std::string PrfsNode::target() const {

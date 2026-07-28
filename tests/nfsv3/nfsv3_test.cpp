@@ -802,6 +802,66 @@ TEST(NfsV3, UsedReflectsSparseAllocation) {
 }
 #endif
 
+//  SETATTR with a client-supplied mtime must preserve the sub-second (nanosecond)
+//  component and return it in fattr3 — utimensat/rsync-style tools compare
+//  sub-second mtimes. Previously the nseconds field was parsed then dropped.
+TEST(NfsV3, SetattrSubsecondMtime) {
+    const int port = 34579;
+
+    auto fs = makeMemStore();
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV3_PLUGIN_SO));
+    loader.startServices();
+
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+    Reply mnt = rpc(fd, PROG_MOUNT, MOUNT_V3, 1, strArg("/"));
+    ASSERT_EQ(mnt.astat, 0u);
+    uint64_t rid = get64(&mnt.body[8]), rs = get64(&mnt.body[16]);
+
+    //  CREATE a file to stamp times on.
+    std::vector<uint8_t> cr = fhArg(rid, rs);
+    {
+        auto n = strArg("t.bin");
+        cr.insert(cr.end(), n.begin(), n.end());
+    }
+    put32(cr, 0); // UNCHECKED
+    for (int i = 0; i < 6; ++i) {
+        put32(cr, 0);
+    }
+    Reply crr = rpc(fd, PROG_NFS, NFS_V3, 8, cr);
+    ASSERT_EQ(get32(&crr.body[0]), 0u);
+    uint64_t id = get64(&crr.body[12]), sn = get64(&crr.body[20]);
+
+    //  SETATTR: mtime = SET_TO_CLIENT { sec=1000, nsec=123456789 }; others unset.
+    uint32_t const NSEC = 123456789;
+    std::vector<uint8_t> sa = fhArg(id, sn);
+    put32(sa, 0);    // set_mode3 = false
+    put32(sa, 0);    // set_uid3
+    put32(sa, 0);    // set_gid3
+    put32(sa, 0);    // set_size3
+    put32(sa, 0);    // set_atime = DONT_CHANGE
+    put32(sa, 2);    // set_mtime = SET_TO_CLIENT_TIME
+    put32(sa, 1000); // mtime.seconds
+    put32(sa, NSEC); // mtime.nseconds
+    put32(sa, 0);    // sattrguard3 = no check
+    Reply sr = rpc(fd, PROG_NFS, NFS_V3, 2, sa);
+    ASSERT_EQ(get32(&sr.body[0]), 0u); // NFS3_OK
+
+    Reply g = rpc(fd, PROG_NFS, NFS_V3, 1, fhArg(id, sn)); // GETATTR
+    ASSERT_EQ(get32(&g.body[0]), 0u);
+    uint32_t msec = get32(&g.body[4 + 68]);  // fattr3 mtime seconds
+    uint32_t mnsec = get32(&g.body[4 + 72]); // fattr3 mtime nseconds
+    EXPECT_EQ(msec, 1000u);
+    EXPECT_EQ(mnsec, NSEC); // sub-second component must round-trip
+
+    ::close(fd);
+    loader.stopAll();
+}
+
 //  Browsing `.snapshot/N` must yield the node's snapshot view, with a distinct
 //  fsid — otherwise the client sees it as the live node and loops (ELOOP).
 TEST(NfsV3, SnapshotBrowse) {

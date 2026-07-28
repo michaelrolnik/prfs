@@ -42,7 +42,7 @@ namespace {
 
 struct Attr {
     Type type{};
-    uint32_t mode = 0, uid = 0, gid = 0, nlink = 0;
+    uint32_t mode = 0, uid = 0, gid = 0, nlink = 0, atimeNs = 0, mtimeNs = 0;
     uint64_t size = 0, atime = 0, mtime = 0, ctime = 0, spec = 0;
 };
 
@@ -101,6 +101,10 @@ public:
     void mtime(uint64_t) override;
     uint64_t ctime() const override;
     void ctime(uint64_t) override;
+    uint32_t atimeNsec() const override;
+    void atimeNsec(uint32_t) override;
+    uint32_t mtimeNsec() const override;
+    void mtimeNsec(uint32_t) override;
 
     std::string target() const override;
     std::pair<uint32_t, uint32_t> rdev() const override;
@@ -676,17 +680,35 @@ void MemNode::size(uint64_t x) {
 }
 
 void MemNode::atime(uint64_t x) {
-    m_store->liveVer(m_id).a.atime = x;
+    Attr& a = m_store->liveVer(m_id).a;
+    a.atime = x;
+    a.atimeNs = 0; // server-time set clears the sub-second part
     m_store->touch(m_id);
 }
 
 void MemNode::mtime(uint64_t x) {
-    m_store->liveVer(m_id).a.mtime = x;
+    Attr& a = m_store->liveVer(m_id).a;
+    a.mtime = x;
+    a.mtimeNs = 0;
     m_store->touch(m_id);
 }
 
 void MemNode::ctime(uint64_t x) {
     m_store->liveVer(m_id).a.ctime = x;
+    m_store->touch(m_id);
+}
+
+uint32_t MemNode::atimeNsec() const { return m_store->effAttr(m_id, m_snap).atimeNs; }
+
+void MemNode::atimeNsec(uint32_t x) {
+    m_store->liveVer(m_id).a.atimeNs = x;
+    m_store->touch(m_id);
+}
+
+uint32_t MemNode::mtimeNsec() const { return m_store->effAttr(m_id, m_snap).mtimeNs; }
+
+void MemNode::mtimeNsec(uint32_t x) {
+    m_store->liveVer(m_id).a.mtimeNs = x;
     m_store->touch(m_id);
 }
 

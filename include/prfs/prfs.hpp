@@ -52,6 +52,16 @@ public:
     virtual uint64_t ctime() const = 0;
     virtual void ctime(uint64_t) = 0;
 
+    //  Sub-second (nanosecond) component of atime/mtime, for NFS nfstime3 and
+    //  sub-second-mtime tools (rsync, utimensat). ctime is always stamped from
+    //  the integer logical clock, so it carries none. The atime(uint64_t) /
+    //  mtime(uint64_t) setters reset the ns to 0 (server-time semantics); a
+    //  client SETATTR sets the ns explicitly afterwards.
+    virtual uint32_t atimeNsec() const = 0;
+    virtual void atimeNsec(uint32_t) = 0;
+    virtual uint32_t mtimeNsec() const = 0;
+    virtual void mtimeNsec(uint32_t) = 0;
+
     //  type-specific views over `spec`:
     virtual std::string target() const = 0;                 // LNK
     virtual std::pair<uint32_t, uint32_t> rdev() const = 0; // BLK/CHR (major,minor)
