@@ -558,6 +558,7 @@ private:
         uint32_t proc = r.u32();
         r.skipAuth(); // cred
         r.skipAuth(); // verf
+        m_host.log().debug("nfsv4: rpc prog={} vers={} proc={}", prog, vers, proc);
 
         std::vector<uint8_t> body;
         Writer w{body};
@@ -613,15 +614,19 @@ private:
         Writer rw{res};
         uint32_t last = NFS4_OK;
         uint32_t done = 0;
+        std::string trace;
         for (uint32_t i = 0; i < nops && r.ok; ++i) {
             uint32_t op = r.u32();
+            trace += std::to_string(op) + " ";
             uint32_t st = doOp(op, r, rw);
             ++done;
             last = st;
             if (st != NFS4_OK) {
+                trace += "=> " + std::to_string(st);
                 break;
             }
         }
+        m_host.log().debug("nfsv4: COMPOUND [ {}] -> {}", trace, last);
         if (!r.ok) {
             last = NFS4ERR_INVAL;
         }
