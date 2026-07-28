@@ -11,9 +11,14 @@
 //  (SETCLIENTID/SETCLIENTID_CONFIRM/RENEW/CLOSE). Write surface: OPEN with
 //  OPEN4_CREATE, WRITE (fold-into-seed, like nfsv3), SETATTR (decode a client
 //  fattr4), CREATE (dir/symlink/device/fifo/socket), REMOVE, RENAME, LINK,
-//  COMMIT. Mutating ops take the store lock exclusively; a mutation stamps the
-//  parent dir's mtime/ctime. Full share/lock state is a follow-up (a fixed
-//  stateid is returned, not enforced); unimplemented ops → NFS4ERR_NOTSUPP.
+//  COMMIT. State (RFC 7530 §9): OPEN establishes share reservations with real
+//  stateids and enforces conflicts (SHARE_DENIED); LOCK/LOCKT/LOCKU enforce
+//  byte-range conflicts (DENIED); READ/WRITE/CLOSE validate the stateid (an
+//  unknown one → BAD_STATEID, a WRITE without WRITE access → OPENMODE). Mutating
+//  store ops take the store lock exclusively and stamp the parent dir's
+//  mtime/ctime; open/lock state is guarded by a separate mutex. Simplified for a
+//  single-client test target: no lease timers (RENEW always OK), no seqid replay
+//  cache, no reboot/grace recovery. Unimplemented ops → NFS4ERR_NOTSUPP.
 //
 //  Filehandle: the same 16 opaque bytes as nfsv3 = big-endian (nodeID, snapId),
 //  decoded via IPrfs::nodeById(); a snapshot view (snapId != LATEST) is read-only.
@@ -61,9 +66,14 @@ enum : uint32_t {
     OP_GETATTR = 9,
     OP_GETFH = 10,
     OP_LINK = 11,
+    OP_LOCK = 12,
+    OP_LOCKT = 13,
+    OP_LOCKU = 14,
     OP_LOOKUP = 15,
     OP_LOOKUPP = 16,
     OP_OPEN = 18,
+    OP_OPEN_CONFIRM = 20,
+    OP_OPEN_DOWNGRADE = 21,
     OP_PUTFH = 22,
     OP_PUTPUBFH = 23,
     OP_PUTROOTFH = 24,
@@ -87,13 +97,21 @@ constexpr uint32_t UNCHECKED4 = 0, GUARDED4 = 1, EXCLUSIVE4 = 2;
 constexpr uint32_t CLAIM_NULL = 0;
 constexpr uint32_t SET_TO_SERVER_TIME4 = 0, SET_TO_CLIENT_TIME4 = 1;
 
+//  share_access4 / share_deny4 bits (OPEN); nfs_lock_type4 (LOCK).
+constexpr uint32_t ACCESS_READ = 1, ACCESS_WRITE = 2, ACCESS_BOTH = 3;
+constexpr uint32_t DENY_NONE = 0, DENY_READ = 1, DENY_WRITE = 2, DENY_BOTH = 3;
+constexpr uint32_t READ_LT = 1, WRITE_LT = 2, READW_LT = 3, WRITEW_LT = 4;
+constexpr uint32_t OPEN4_RESULT_CONFIRM = 2;
+
 //  nfsstat4 (subset).
 constexpr uint32_t NFS4_OK = 0, NFS4ERR_PERM = 1, NFS4ERR_NOENT = 2, NFS4ERR_IO = 5,
                    NFS4ERR_EXIST = 17, NFS4ERR_NOTDIR = 20, NFS4ERR_ISDIR = 21, NFS4ERR_INVAL = 22,
                    NFS4ERR_ROFS = 30, NFS4ERR_NOTEMPTY = 66, NFS4ERR_STALE = 70,
                    NFS4ERR_BADHANDLE = 10001, NFS4ERR_BAD_COOKIE = 10003, NFS4ERR_NOTSUPP = 10004,
-                   NFS4ERR_RESOURCE = 10018, NFS4ERR_NOFILEHANDLE = 10020,
-                   NFS4ERR_ATTRNOTSUPP = 10032, NFS4ERR_OP_ILLEGAL = 10044;
+                   NFS4ERR_DENIED = 10010, NFS4ERR_SHARE_DENIED = 10015, NFS4ERR_RESOURCE = 10018,
+                   NFS4ERR_NOFILEHANDLE = 10020, NFS4ERR_BAD_STATEID = 10025,
+                   NFS4ERR_LOCK_RANGE = 10028, NFS4ERR_ATTRNOTSUPP = 10032,
+                   NFS4ERR_OPENMODE = 10038, NFS4ERR_OP_ILLEGAL = 10044;
 
 //  READDIR cookie ↔ name bridge (as in nfsv3): NFSv4 cookies are opaque u64 the
 //  client echoes back; the store resumes readdirPage by NAME. An entry's cookie
@@ -516,6 +534,50 @@ struct Cfh {
 
 thread_local Cfh t_fh;
 
+//  --- NFSv4 open/lock state (RFC 7530 §9). Simplified for a single-client test
+//  target: no lease timers (leases never expire; RENEW always OK), no seqid
+//  replay cache, no reboot/grace recovery. What IS enforced: share reservations
+//  (OPEN access/deny conflicts → SHARE_DENIED), byte-range lock conflicts (→
+//  DENIED), and stateid validity on READ/WRITE/CLOSE/LOCK. ---
+
+//  A stateid is { uint32 seqid; opaque other[12] }. We pack other as an 8-byte
+//  id (the table key) + a 4-byte tag (0 = open, 1 = lock). All-zero / all-ones
+//  are the anonymous / read-bypass special stateids (valid, no state lookup).
+struct Stateid {
+    uint32_t seqid = 0;
+    uint64_t id = 0;
+    uint32_t tag = 0;
+    bool special = false; // all-zeros or all-ones
+};
+
+struct OpenState {
+    uint64_t clientid = 0;
+    std::string owner;
+    uint64_t fileId = 0;
+    uint32_t access = 0, deny = 0;
+    uint32_t seqid = 1;
+};
+
+struct LockRange {
+    uint64_t off = 0, len = 0; // len == ~0 ⇒ to EOF
+    uint32_t type = 0;         // READ_LT / WRITE_LT
+};
+
+struct LockState {
+    uint64_t clientid = 0;
+    std::string owner;
+    uint64_t fileId = 0;
+    uint32_t seqid = 1;
+    std::vector<LockRange> ranges;
+};
+
+//  [off,len) overlap, with len==~0 meaning "to EOF".
+bool overlaps(uint64_t aoff, uint64_t alen, uint64_t boff, uint64_t blen) {
+    uint64_t aend = alen == ~0ull ? ~0ull : aoff + alen;
+    uint64_t bend = blen == ~0ull ? ~0ull : boff + blen;
+    return aoff < bend && boff < aend;
+}
+
 class NfsV4 : public IService {
 public:
     explicit NfsV4(IHost& host)
@@ -782,13 +844,18 @@ private:
             return opReaddir(r, rw);
         case OP_OPEN:
             return opOpen(r, rw);
-        case OP_CLOSE: {
-            r.u32();    // seqid
-            r.skip(16); // stateid { u32 seqid; opaque other[12] }
-            rw.u32(NFS4_OK);
-            emitStateid(rw); // an all-zero-ish close stateid
-            return NFS4_OK;
-        }
+        case OP_OPEN_CONFIRM:
+            return opOpenConfirm(r, rw);
+        case OP_OPEN_DOWNGRADE:
+            return opOpenDowngrade(r, rw);
+        case OP_CLOSE:
+            return opClose(r, rw);
+        case OP_LOCK:
+            return opLock(r, rw);
+        case OP_LOCKT:
+            return opLockt(r, rw);
+        case OP_LOCKU:
+            return opLocku(r, rw);
         case OP_RENEW: {
             r.u64(); // clientid
             rw.u32(NFS4_OK);
@@ -918,11 +985,55 @@ private:
         return t_fh.hasCfh ? fs.nodeById(t_fh.cfh.first, t_fh.cfh.second) : nullptr;
     }
 
-    void emitStateid(Writer& rw) {
-        rw.u32(1); // stateid.seqid
-        for (int i = 0; i < 12; ++i) {
-            rw.v.push_back(0);
-        } // stateid.other[12]
+    //  stateid4 { seqid; other[12] } — other = 8-byte id ‖ 4-byte tag.
+    void writeStateid(Writer& rw, uint32_t seqid, uint64_t id, uint32_t tag) {
+        rw.u32(seqid);
+        rw.u64(id);
+        rw.u32(tag);
+    }
+
+    Stateid readStateid(Reader& r) {
+        Stateid s;
+        s.seqid = r.u32();
+        s.id = r.u64();
+        s.tag = r.u32();
+        s.special = (s.seqid == 0 && s.id == 0 && s.tag == 0) ||
+                    (s.seqid == 0xffffffffu && s.id == ~0ull && s.tag == 0xffffffffu);
+        return s;
+    }
+
+    //  Validate a stateid presented on READ/WRITE/CLOSE for `fileId`. Special
+    //  stateids are always accepted. Returns the open's access bits (via `access`)
+    //  when it names a live open, or a special all-access when special. Sets an
+    //  nfsstat4 error otherwise. Caller holds m_stateMu.
+    uint32_t checkStateid(Stateid const& s, uint64_t fileId, uint32_t& access) {
+        if (s.special) {
+            access = ACCESS_BOTH;
+            return NFS4_OK;
+        }
+        if (s.tag == 0) {
+            auto it = m_opens.find(s.id);
+            if (it == m_opens.end() || it->second.fileId != fileId) {
+                return NFS4ERR_BAD_STATEID;
+            }
+            access = it->second.access;
+            return NFS4_OK;
+        }
+        auto it = m_locks.find(s.id); // a lock stateid also authorizes I/O
+        if (it == m_locks.end() || it->second.fileId != fileId) {
+            return NFS4ERR_BAD_STATEID;
+        }
+        access = ACCESS_BOTH;
+        return NFS4_OK;
+    }
+
+    //  Encode LOCK4denied { offset; length; locktype; lock_owner{clientid,owner} }.
+    void writeDenied(Writer& rw, LockRange const& c, uint64_t clientid, std::string const& owner) {
+        rw.u64(c.off);
+        rw.u64(c.len);
+        rw.u32(c.type);
+        rw.u64(clientid);
+        rw.str(owner);
     }
 
     uint32_t opLookup(Reader& r, Writer& rw, bool parent) {
@@ -1002,7 +1113,7 @@ private:
 
     uint32_t opRead(Reader& r, Writer& rw) {
         IPrfs& fs = m_host.fs();
-        r.skip(16); // stateid (any accepted — read-only, no share enforcement)
+        Stateid sid = readStateid(r);
         uint64_t off = r.u64();
         uint32_t cnt = r.u32();
         Node n = cur(fs);
@@ -1013,6 +1124,18 @@ private:
         if (n->type() == Type::DIR) {
             rw.u32(NFS4ERR_ISDIR);
             return NFS4ERR_ISDIR;
+        }
+        {
+            std::lock_guard<std::mutex> sl(m_stateMu);
+            uint32_t acc = 0, st = checkStateid(sid, n->id(), acc);
+            if (st != NFS4_OK) {
+                rw.u32(st);
+                return st;
+            }
+            if (!(acc & ACCESS_READ)) {
+                rw.u32(NFS4ERR_OPENMODE);
+                return NFS4ERR_OPENMODE;
+            }
         }
         if (cnt > MAX_IO) {
             cnt = MAX_IO;
@@ -1132,14 +1255,15 @@ private:
     }
 
     //  OPEN (CLAIM_NULL): opens a file for reading, or creates a regular file
-    //  (OPEN4_CREATE). Returns a fixed stateid; share/lock state is not enforced.
+    //  (OPEN4_CREATE). Establishes share-reservation state and returns a real
+    //  stateid; a conflicting share_access/share_deny → NFS4ERR_SHARE_DENIED.
     uint32_t opOpen(Reader& r, Writer& rw) {
         IPrfs& fs = m_host.fs();
-        r.u32();                     // seqid
-        r.u32();                     // share_access
-        r.u32();                     // share_deny
-        r.u64();                     // open_owner.clientid
-        r.skipOpaque();              // open_owner.owner<>
+        r.u32();                     // open_seqid
+        uint32_t access = r.u32();   // share_access
+        uint32_t deny = r.u32();     // share_deny
+        uint64_t clientid = r.u64(); // open_owner.clientid
+        std::string owner = r.str(); // open_owner.owner<>
         uint32_t opentype = r.u32(); // openflag4.opentype
         uint32_t createmode = 0;
         bool haveAttrs = false;
@@ -1198,10 +1322,42 @@ private:
         }
         t_fh.cfh = {child->id(), child->snap()};
         t_fh.hasCfh = true;
+
+        //  Establish (or upgrade) the open state, enforcing share reservations.
+        uint64_t fileId = child->id();
+        uint32_t stSeqid;
+        uint64_t stId;
+        {
+            std::lock_guard<std::mutex> sl(m_stateMu);
+            uint64_t upId = 0;
+            for (auto& [k, o] : m_opens) {
+                if (o.fileId == fileId && o.clientid == clientid && o.owner == owner) {
+                    upId = k; // same open-owner ⇒ upgrade, not a conflict
+                    break;
+                }
+            }
+            if (upId) {
+                OpenState& o = m_opens[upId];
+                o.access |= access;
+                o.deny |= deny;
+                stSeqid = ++o.seqid;
+                stId = upId;
+            } else {
+                for (auto const& [k, o] : m_opens) {
+                    if (o.fileId == fileId && ((access & o.deny) || (deny & o.access))) {
+                        rw.u32(NFS4ERR_SHARE_DENIED);
+                        return NFS4ERR_SHARE_DENIED;
+                    }
+                }
+                stId = m_nextState++;
+                m_opens[stId] = OpenState{clientid, owner, fileId, access, deny, 1};
+                stSeqid = 1;
+            }
+        }
         rw.u32(NFS4_OK);
-        emitStateid(rw);                                         // OPEN4resok.stateid
+        writeStateid(rw, stSeqid, stId, 0);                      // OPEN4resok.stateid
         changeInfo(rw, before, created ? dir->ctime() : before); // cinfo
-        rw.u32(0);                                               // rflags
+        rw.u32(0);                                               // rflags (no CONFIRM required)
         rw.u32(2);                                               // attrset bitmap (empty)
         rw.u32(0);
         rw.u32(0);
@@ -1209,11 +1365,185 @@ private:
         return NFS4_OK;
     }
 
+    uint32_t opClose(Reader& r, Writer& rw) {
+        r.u32(); // seqid
+        Stateid sid = readStateid(r);
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        if (!sid.special) {
+            auto it = m_opens.find(sid.id);
+            if (it == m_opens.end()) {
+                rw.u32(NFS4ERR_BAD_STATEID);
+                return NFS4ERR_BAD_STATEID;
+            }
+            m_opens.erase(it);
+        }
+        rw.u32(NFS4_OK);
+        writeStateid(rw, sid.seqid + 1, sid.id, sid.tag); // CLOSE4resok.open_stateid
+        return NFS4_OK;
+    }
+
+    uint32_t opOpenConfirm(Reader& r, Writer& rw) {
+        Stateid sid = readStateid(r);
+        r.u32(); // seqid
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        uint32_t sq = sid.seqid;
+        auto it = m_opens.find(sid.id);
+        if (it != m_opens.end()) {
+            sq = ++it->second.seqid;
+        }
+        rw.u32(NFS4_OK);
+        writeStateid(rw, sq, sid.id, sid.tag);
+        return NFS4_OK;
+    }
+
+    uint32_t opOpenDowngrade(Reader& r, Writer& rw) {
+        Stateid sid = readStateid(r);
+        r.u32();                   // seqid
+        uint32_t access = r.u32(); // reduced share_access
+        uint32_t deny = r.u32();   // reduced share_deny
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        auto it = m_opens.find(sid.id);
+        if (it == m_opens.end()) {
+            rw.u32(NFS4ERR_BAD_STATEID);
+            return NFS4ERR_BAD_STATEID;
+        }
+        it->second.access = access;
+        it->second.deny = deny;
+        rw.u32(NFS4_OK);
+        writeStateid(rw, ++it->second.seqid, sid.id, sid.tag);
+        return NFS4_OK;
+    }
+
+    //  LOCK — establish a byte-range lock; a conflicting range held by a different
+    //  lock-owner → NFS4ERR_DENIED with the conflicting LOCK4denied.
+    uint32_t opLock(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        uint32_t locktype = r.u32();
+        r.u32(); // reclaim
+        uint64_t off = r.u64();
+        uint64_t len = r.u64();
+        uint32_t isNew = r.u32(); // new_lock_owner
+        uint64_t clientid = 0;
+        std::string owner;
+        Stateid existing{};
+        if (isNew) {
+            r.u32();        // open_seqid
+            readStateid(r); // open_stateid
+            r.u32();        // lock_seqid
+            clientid = r.u64();
+            owner = r.str();
+        } else {
+            existing = readStateid(r); // lock_stateid
+            r.u32();                   // lock_seqid
+        }
+        Node n = cur(fs);
+        if (!n) {
+            rw.u32(NFS4ERR_NOFILEHANDLE);
+            return NFS4ERR_NOFILEHANDLE;
+        }
+        uint64_t fileId = n->id();
+        bool write = (locktype == WRITE_LT || locktype == WRITEW_LT);
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        if (!isNew) {
+            auto it = m_locks.find(existing.id);
+            if (it == m_locks.end()) {
+                rw.u32(NFS4ERR_BAD_STATEID);
+                return NFS4ERR_BAD_STATEID;
+            }
+            clientid = it->second.clientid;
+            owner = it->second.owner;
+        }
+        for (auto const& [k, L] : m_locks) {
+            if (L.fileId != fileId || (L.clientid == clientid && L.owner == owner)) {
+                continue;
+            }
+            for (auto const& rg : L.ranges) {
+                if (overlaps(off, len, rg.off, rg.len) && (write || rg.type == WRITE_LT)) {
+                    rw.u32(NFS4ERR_DENIED);
+                    writeDenied(rw, rg, L.clientid, L.owner);
+                    return NFS4ERR_DENIED;
+                }
+            }
+        }
+        uint64_t lid = 0;
+        for (auto& [k, L] : m_locks) {
+            if (L.fileId == fileId && L.clientid == clientid && L.owner == owner) {
+                lid = k;
+                break;
+            }
+        }
+        if (!lid) {
+            lid = m_nextState++;
+            m_locks[lid] = LockState{clientid, owner, fileId, 1, {}};
+        }
+        LockState& L = m_locks[lid];
+        L.ranges.push_back({off, len, write ? WRITE_LT : READ_LT});
+        rw.u32(NFS4_OK);
+        writeStateid(rw, ++L.seqid, lid, 1); // LOCK4resok.lock_stateid
+        return NFS4_OK;
+    }
+
+    //  LOCKT — test for a conflicting lock without acquiring one.
+    uint32_t opLockt(Reader& r, Writer& rw) {
+        IPrfs& fs = m_host.fs();
+        uint32_t locktype = r.u32();
+        uint64_t off = r.u64();
+        uint64_t len = r.u64();
+        uint64_t clientid = r.u64();
+        std::string owner = r.str();
+        Node n = cur(fs);
+        if (!n) {
+            rw.u32(NFS4ERR_NOFILEHANDLE);
+            return NFS4ERR_NOFILEHANDLE;
+        }
+        uint64_t fileId = n->id();
+        bool write = (locktype == WRITE_LT || locktype == WRITEW_LT);
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        for (auto const& [k, L] : m_locks) {
+            if (L.fileId != fileId || (L.clientid == clientid && L.owner == owner)) {
+                continue;
+            }
+            for (auto const& rg : L.ranges) {
+                if (overlaps(off, len, rg.off, rg.len) && (write || rg.type == WRITE_LT)) {
+                    rw.u32(NFS4ERR_DENIED);
+                    writeDenied(rw, rg, L.clientid, L.owner);
+                    return NFS4ERR_DENIED;
+                }
+            }
+        }
+        rw.u32(NFS4_OK); // LOCKT4res on OK carries no body
+        return NFS4_OK;
+    }
+
+    //  LOCKU — release the given byte range from the lock owner's held ranges.
+    uint32_t opLocku(Reader& r, Writer& rw) {
+        r.u32();                      // locktype
+        r.u32();                      // seqid
+        Stateid sid = readStateid(r); // lock_stateid
+        uint64_t off = r.u64();
+        uint64_t len = r.u64();
+        std::lock_guard<std::mutex> sl(m_stateMu);
+        auto it = m_locks.find(sid.id);
+        if (it == m_locks.end()) {
+            rw.u32(NFS4ERR_BAD_STATEID);
+            return NFS4ERR_BAD_STATEID;
+        }
+        auto& ranges = it->second.ranges;
+        ranges.erase(
+            std::remove_if(ranges.begin(), ranges.end(),
+                           [&](LockRange const& rg) { return overlaps(off, len, rg.off, rg.len); }),
+            ranges.end());
+        rw.u32(NFS4_OK);
+        writeStateid(rw, ++it->second.seqid, sid.id, 1);
+        return NFS4_OK;
+    }
+
     //  WRITE — stores no bytes: folds the data into the file's content seed and
-    //  grows the size, so READ regenerates content reflecting the write.
+    //  grows the size, so READ regenerates content reflecting the write. The
+    //  stateid must name an open with WRITE access (or be a special stateid).
     uint32_t opWrite(Reader& r, Writer& rw) {
         IPrfs& fs = m_host.fs();
-        r.skip(16); // stateid
+        Stateid sid = readStateid(r);
         uint64_t off = r.u64();
         r.u32(); // stable_how4
         std::string data = r.str();
@@ -1229,6 +1559,18 @@ private:
         if (n->type() == Type::DIR) {
             rw.u32(NFS4ERR_ISDIR);
             return NFS4ERR_ISDIR;
+        }
+        {
+            std::lock_guard<std::mutex> sl(m_stateMu);
+            uint32_t acc = 0, st = checkStateid(sid, n->id(), acc);
+            if (st != NFS4_OK) {
+                rw.u32(st);
+                return st;
+            }
+            if (!(acc & ACCESS_WRITE)) {
+                rw.u32(NFS4ERR_OPENMODE);
+                return NFS4ERR_OPENMODE;
+            }
         }
         fs.setContentSeed(n, mixSeed(n->contentSeed(), off, data));
         if (off + data.size() > n->size()) {
@@ -1453,6 +1795,13 @@ private:
     static constexpr size_t CK_CACHE_MAX = 1u << 16;
     std::mutex m_ckMu;
     std::unordered_map<uint64_t, std::string> m_ckName;
+
+    //  Open/lock state (guarded by m_stateMu, taken after the store lock). Keyed
+    //  by the stateid's 8-byte id; `m_nextState` mints ids.
+    std::mutex m_stateMu;
+    uint64_t m_nextState = 1;
+    std::unordered_map<uint64_t, OpenState> m_opens;
+    std::unordered_map<uint64_t, LockState> m_locks;
 };
 
 struct NfsV4Plugin : IPlugin {

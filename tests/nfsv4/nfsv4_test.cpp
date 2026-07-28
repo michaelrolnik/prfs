@@ -437,3 +437,125 @@ TEST(NfsV4, WriteSurface) {
     ::close(fd);
     loader.stopAll();
 }
+
+//  Share reservations and byte-range locks are enforced: a conflicting OPEN gets
+//  SHARE_DENIED, an unknown stateid on WRITE gets BAD_STATEID, and a conflicting
+//  LOCKT gets DENIED.
+TEST(NfsV4, ShareAndLockState) {
+    const int port = 34583;
+
+    auto fs = makeMemStore();
+    Node root = fs->rwRoot();
+    {
+        Node f = fs->mkfile("");
+        f->size(10);
+        ASSERT_EQ(fs->link(root, "f", f), Error::OK);
+        Node g = fs->mkfile("");
+        g->size(10);
+        ASSERT_EQ(fs->link(root, "g", g), Error::OK);
+    }
+
+    auto log = quietLogger();
+    host::Host h(*fs, *log);
+    h.setOption("port", std::to_string(port));
+    host::Loader loader(h);
+    ASSERT_TRUE(loader.load(NFSV4_PLUGIN_SO));
+    loader.startServices();
+    int fd = connectLoopback(port);
+    ASSERT_GE(fd, 0);
+
+    auto compound = [&](std::vector<uint8_t> ops, uint32_t nops) -> uint32_t {
+        std::vector<uint8_t> c;
+        put32(c, 0);
+        put32(c, 0);
+        put32(c, nops);
+        c.insert(c.end(), ops.begin(), ops.end());
+        Reply rp = rpc(fd, 1, c);
+        EXPECT_EQ(rp.astat, 0u);
+        return get32(&rp.body[0]); // COMPOUND status = last op's status
+    };
+    auto openOp = [&](uint32_t access, uint32_t deny, std::string const& owner,
+                      std::string const& name) {
+        std::vector<uint8_t> o;
+        put32(o, 18); // OPEN
+        put32(o, 0);  // open_seqid
+        put32(o, access);
+        put32(o, deny);
+        putU64(o, 0); // open_owner.clientid
+        putStr(o, owner);
+        put32(o, 0); // opentype NOCREATE
+        put32(o, 0); // claim CLAIM_NULL
+        putStr(o, name);
+        return o;
+    };
+
+    //  1. ownerA opens "f" denying WRITE; ownerB opening for WRITE → SHARE_DENIED.
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24); // PUTROOTFH
+        auto o = openOp(1 /*READ*/, 2 /*DENY_WRITE*/, "ownerA", "f");
+        ops.insert(ops.end(), o.begin(), o.end());
+        EXPECT_EQ(compound(ops, 2), 0u); // A's open OK
+    }
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24);
+        auto o = openOp(2 /*WRITE*/, 0, "ownerB", "f");
+        ops.insert(ops.end(), o.begin(), o.end());
+        EXPECT_EQ(compound(ops, 2), 10015u); // NFS4ERR_SHARE_DENIED
+    }
+
+    //  2. WRITE with an unknown (non-special) stateid → BAD_STATEID.
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24); // PUTROOTFH
+        put32(ops, 15); // LOOKUP
+        putStr(ops, "g");
+        put32(ops, 38);                      // WRITE
+        put32(ops, 7);                       // stateid.seqid
+        putU64(ops, 999999);                 // stateid.other id (unknown)
+        put32(ops, 0);                       // stateid.other tag
+        putU64(ops, 0);                      // offset
+        put32(ops, 2);                       // stable
+        putStr(ops, "xx");                   // data
+        EXPECT_EQ(compound(ops, 3), 10025u); // NFS4ERR_BAD_STATEID
+    }
+
+    //  3. ownerLA write-locks g[0,100); ownerLB's overlapping LOCKT → DENIED.
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24);
+        put32(ops, 15);
+        putStr(ops, "g"); // LOOKUP g
+        put32(ops, 12);   // LOCK
+        put32(ops, 2);    // WRITE_LT
+        put32(ops, 0);    // reclaim
+        putU64(ops, 0);   // offset
+        putU64(ops, 100); // length
+        put32(ops, 1);    // new_lock_owner
+        put32(ops, 0);    // open_seqid
+        for (int i = 0; i < 4; ++i) {
+            put32(ops, 0); // open_stateid (all-zero special)
+        }
+        put32(ops, 0);  // lock_seqid
+        putU64(ops, 0); // lock_owner.clientid
+        putStr(ops, "LA");
+        EXPECT_EQ(compound(ops, 3), 0u); // LOCK OK
+    }
+    {
+        std::vector<uint8_t> ops;
+        put32(ops, 24);
+        put32(ops, 15);
+        putStr(ops, "g"); // LOOKUP g
+        put32(ops, 13);   // LOCKT
+        put32(ops, 2);    // WRITE_LT
+        putU64(ops, 50);  // offset (overlaps [0,100))
+        putU64(ops, 100); // length
+        putU64(ops, 0);   // owner.clientid
+        putStr(ops, "LB");
+        EXPECT_EQ(compound(ops, 3), 10010u); // NFS4ERR_DENIED
+    }
+
+    ::close(fd);
+    loader.stopAll();
+}
