@@ -1,3 +1,8 @@
 title: prfs — Pseudo-Random File System
 description: A synthetic NFS target for testing archive/backup tools — content is generated from a seed, never stored.
 theme: jekyll-theme-cayman
+
+# Absolute-URL base for the GitHub Pages project site (michaelrolnik.github.io/prfs).
+# Needed so sitemap.xml `absolute_url` and theme asset paths resolve correctly.
+url: https://michaelrolnik.github.io
+baseurl: /prfs
